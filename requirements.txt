@@ -1,0 +1,5 @@
+python-telegram-bot>=20.0
+mistune>=3.0
+pyyaml>=6.0
+# Optional: Voice transcription (Apple Silicon only)
+# mlx-whisper

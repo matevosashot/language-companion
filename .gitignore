@@ -1,0 +1,11 @@
+.DS_Store
+.env
+__pycache__/
+*.pyc
+*.log
+.venv/
+
+# User chat histories / session data (personal data, do not commit)
+.telegram-german-sessions/
+*.migrated
+claude_working_dir_teacher/
