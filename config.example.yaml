@@ -1,0 +1,41 @@
+bot:
+  token_env: LANGUAGE_COMPANION_BOT_TOKEN  # env var holding the bot token (falls back to TELEGRAM_BOT_TOKEN)
+  allowed_users: [123456789]         # Telegram user IDs allowed to use the bot
+
+claude:
+  path: claude                       # CLI binary
+  allowed_tools: [Read, WebSearch, Skill] # allowed tools for all models
+  friend:
+    allowed_tools: [Read, WebSearch, Skill] # overide allowed tools for friend model
+    model: claude-sonnet-4-6
+    default_language_level: B2
+    workdir: german/friend
+  teacher:
+    allowed_tools: [Read, WebSearch, Skill]
+    model: claude-sonnet-4-6
+    default_language_level: B2
+    workdir: german/teacher
+
+sessions:
+  dir: .telegram-german-sessions/    # one JSON file per Telegram user lives here
+  friend_history_max: 10             # /rewind can go back up to this many turns
+
+proactivity:
+  idle_ping_after_seconds: 86400     # 24h silence before a re-engagement ping
+  idle_check_interval_seconds: 3600  # how often the background loop wakes
+  idle_prompt: |
+    [SYSTEM] Der Nutzer war 24 Stunden still. Beginne ein neues Gespräch —
+    frag etwas Interessantes oder erzähl einen typisch deutschen Witz.
+    Beziehe dich NICHT darauf, dass er weg war. Schreib einfach, als ob
+    dir gerade etwas eingefallen wäre.
+
+teacher:
+  ok_marker: "OK"                    # exact string Lehrer outputs when the message is correct
+  ok_reaction: "👀"                  # emoji reaction sent when ok_marker is returned
+
+voice:
+  enabled: true                      # auto-disabled if mlx-whisper is not importable
+  model: mlx-community/whisper-small-mlx
+
+logging:
+  level: INFO

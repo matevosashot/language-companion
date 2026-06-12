@@ -5,6 +5,9 @@ __pycache__/
 *.log
 .venv/
 
+# Local config with real user IDs (use config.example.yaml as template)
+config.yaml
+
 # User chat histories / session data (personal data, do not commit)
 .telegram-german-sessions/
 *.migrated
