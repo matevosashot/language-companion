@@ -4,7 +4,11 @@ import asyncio
 import logging
 from pathlib import Path
 
-from telegram import BotCommand, BotCommandScopeAllPrivateChats
+from telegram import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -18,10 +22,20 @@ BOT_COMMANDS = [
     BotCommand("new_friend", "Nur Freund-Session neu starten"),
     BotCommand("new_teacher", "Lehrer-Session zurücksetzen"),
     BotCommand("teacher", "Frage an den Lehrer stellen"),
+    BotCommand("level", "Dein Deutsch-Niveau setzen (A1–C2)"),
     BotCommand("rewind", "Letzte Freund-Nachrichten zurückspulen"),
     BotCommand("reload", "CLAUDE.md für beide Personas neu laden"),
     BotCommand("reload_friend", "CLAUDE.md des Freundes neu laden"),
     BotCommand("reload_teacher", "CLAUDE.md des Lehrers neu laden"),
+    BotCommand("status", "Aktuellen Sitzungsstatus anzeigen"),
+    BotCommand("ping", "Erreichbarkeit prüfen"),
+]
+
+# Groups run teacher-only — friend/rewind/onboarding commands are hidden there.
+GROUP_BOT_COMMANDS = [
+    BotCommand("teacher", "Frage an den Lehrer stellen"),
+    BotCommand("new_teacher", "Lehrer-Session zurücksetzen"),
+    BotCommand("level", "Dein Deutsch-Niveau setzen (A1–C2)"),
     BotCommand("status", "Aktuellen Sitzungsstatus anzeigen"),
     BotCommand("ping", "Erreichbarkeit prüfen"),
 ]
@@ -38,6 +52,7 @@ from .config import (
 )
 from .handlers import (
     handle_message,
+    level_cmd,
     new_teacher_cmd,
     ping_cmd,
     reload_cmd,
@@ -69,6 +84,7 @@ def main():
     app.add_handler(build_onboarding_handler())
     app.add_handler(CommandHandler("teacher", teacher_cmd))
     app.add_handler(CommandHandler("new_teacher", new_teacher_cmd))
+    app.add_handler(CommandHandler("level", level_cmd))
     app.add_handler(CommandHandler("reload_friend", reload_friend_cmd))
     app.add_handler(CommandHandler("reload_teacher", reload_teacher_cmd))
     app.add_handler(CommandHandler("reload", reload_cmd))
@@ -82,6 +98,9 @@ def main():
     async def on_startup(application: Application):
         await application.bot.set_my_commands(
             BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats()
+        )
+        await application.bot.set_my_commands(
+            GROUP_BOT_COMMANDS, scope=BotCommandScopeAllGroupChats()
         )
         asyncio.create_task(idle_pinger(application))
 

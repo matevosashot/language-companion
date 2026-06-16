@@ -12,7 +12,7 @@ from telegram.ext import (
 
 from .config import FRIEND_DEFAULT_LEVEL
 from .friend import cancel_pending_friend
-from .handlers import is_allowed
+from .handlers import is_allowed, is_group_chat
 from .sessions import VALID_LEVELS, load_user, save_user
 
 ONB_CONFIRM, ONB_NAME, ONB_AGE, ONB_GENDER, ONB_CITY, ONB_EXTRAS, ONB_LEVEL = range(7)
@@ -43,6 +43,12 @@ def _is_new_command(text: str) -> bool:
 
 
 async def onb_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if is_group_chat(update):
+        await update.message.reply_text(
+            "Der Freund ist nur im Privatchat verfügbar. In der Gruppe bin ich "
+            "nur der Lehrer."
+        )
+        return ConversationHandler.END
     if not is_allowed(update):
         await update.message.reply_text("Nicht autorisiert.")
         return ConversationHandler.END

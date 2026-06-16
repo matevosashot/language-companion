@@ -18,8 +18,10 @@ def _transcribe_sync(path: str) -> str:
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from .handlers import handle_user_text, is_allowed
+    from .handlers import handle_user_text, is_allowed, is_group_chat
 
+    if is_group_chat(update):
+        return  # v1: voice notes are ignored in groups (text-only)
     if not is_allowed(update):
         await update.message.reply_text("Nicht autorisiert.")
         return

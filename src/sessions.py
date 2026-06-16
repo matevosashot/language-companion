@@ -3,7 +3,7 @@
 import datetime as dt
 import json
 
-from .config import FRIEND_DEFAULT_LEVEL, SESSIONS_DIR
+from .config import SESSIONS_DIR
 
 VALID_LEVELS = {"A1", "A2", "B1", "B2", "C1", "C2"}
 
@@ -12,8 +12,13 @@ def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _user_path(uid: int):
-    return SESSIONS_DIR / f"{uid}.json"
+def _user_path(uid: int, chat_id: int | None = None):
+    # Private chats: SESSIONS_DIR/{uid}.json (unchanged). Group chats: keyed by
+    # (chat, user) under a groups/ subdir so each member has isolated teacher
+    # state and so the idle loop (iter_user_ids) never enumerates them.
+    if chat_id is None:
+        return SESSIONS_DIR / f"{uid}.json"
+    return SESSIONS_DIR / "groups" / f"{chat_id}_{uid}.json"
 
 
 def _default_user() -> dict:
@@ -27,23 +32,26 @@ def _default_user() -> dict:
         "last_friend_reply": None,
         "friend_message_ids": [],
         "last_teacher_message_id": None,
-        "user_level": FRIEND_DEFAULT_LEVEL,
+        "user_level": None,  # None = not chosen yet; readers fall back to a default
     }
 
 
-def load_user(uid: int) -> dict:
-    path = _user_path(uid)
+def load_user(uid: int, chat_id: int | None = None) -> dict:
+    path = _user_path(uid, chat_id)
     if not path.exists():
         return _default_user()
     return json.loads(path.read_text())
 
 
-def save_user(uid: int, data: dict) -> None:
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    _user_path(uid).write_text(json.dumps(data, indent=2, ensure_ascii=False))
+def save_user(uid: int, data: dict, chat_id: int | None = None) -> None:
+    path = _user_path(uid, chat_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def iter_user_ids() -> list[int]:
+    # Private-chat users only: non-recursive glob deliberately skips the
+    # groups/ subdir so the idle pinger never re-engages group members.
     if not SESSIONS_DIR.exists():
         return []
     out = []

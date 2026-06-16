@@ -24,6 +24,7 @@ CFG = yaml.safe_load((SCRIPT_DIR / "config.yaml").read_text())
 
 BOT_TOKEN = os.environ.get(CFG["bot"]["token_env"]) or os.environ.get("TELEGRAM_BOT_TOKEN")
 ALLOWED_USERS = set(CFG["bot"].get("allowed_users") or [])
+ALLOWED_CHATS = set(CFG["bot"].get("allowed_chats") or [])
 
 _CLAUDE = CFG["claude"]
 CLAUDE_PATH = _CLAUDE["path"]
@@ -63,6 +64,7 @@ IDLE_PROMPT = CFG["proactivity"]["idle_prompt"]
 
 TEACHER_OK_MARKER = CFG["teacher"]["ok_marker"]
 TEACHER_OK_REACTION = CFG["teacher"]["ok_reaction"]
+TEACHER_GROUP_LEVEL = CFG["teacher"].get("group_level") or TEACHER_DEFAULT_LEVEL
 
 VOICE_CFG_ENABLED = bool(CFG["voice"]["enabled"])
 VOICE_MODEL = CFG["voice"]["model"]

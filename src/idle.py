@@ -18,6 +18,9 @@ async def idle_pinger(app: Application) -> None:
     while True:
         try:
             now = dt.datetime.now(dt.timezone.utc)
+            # iter_user_ids() only enumerates private-chat files; group teacher
+            # state lives in groups/ and is intentionally never idle-pinged
+            # (no friend persona runs in groups).
             for uid in iter_user_ids():
                 user = load_user(uid)
                 last = user.get("last_message_ts")

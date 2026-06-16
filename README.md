@@ -79,7 +79,9 @@ LANGUAGE_COMPANION_BOT_TOKEN=123456:abcdef...
 
 Edit `config.yaml`:
 
-- `bot.allowed_users` — Telegram user IDs allowed to talk to the bot (empty = open)
+- `bot.allowed_users` — Telegram user IDs allowed to talk to the bot in private (empty = open)
+- `bot.allowed_chats` — group/supergroup chat IDs where teacher-only mode runs (empty = no groups)
+- `teacher.group_level` — single CEFR level used for all members in group chats
 - `claude.path` — path to the `claude` CLI binary
 - `claude.friend_model` / `claude.teacher_model` — model IDs (e.g. `claude-sonnet-4-6`)
 - `sessions.dir` — where per-user JSON files live
@@ -98,6 +100,7 @@ python german-teacher-bot.py
 | `/new` | Onboard a fresh Freund + reset Lehrer session |
 | `/new_friend` | Same, but keep the Lehrer session |
 | `/new_teacher` | Reset only the Lehrer |
+| `/level <A1–C2>` | Set the CEFR level the Lehrer grades against (resets the Lehrer session). Works in private and per-member in groups. |
 | `/reload` | Re-read both `CLAUDE.md` files inside active sessions |
 | `/reload_friend`, `/reload_teacher` | Reload just one |
 | `/rewind [N]` | Forget the last N Freund turns (default 1) |
@@ -105,6 +108,40 @@ python german-teacher-bot.py
 | `/status` | Show profile, level, history depth, voice state |
 | `/ping` | Sanity check |
 | `/cancel` | Abort onboarding |
+
+## Group chats (teacher-only mode)
+
+The bot can also sit in a **group chat as the Lehrer only** — the Freund persona is
+completely disabled there. Members talk to each other in German and the teacher
+reply-corrects each person's messages inline (or sets the 👀 reaction when a message is
+fine), exactly like the private-chat teacher.
+
+- **Per-member state.** Each member's teacher session and follow-up tracking are isolated
+  per `(group, user)` and stored under `.telegram-german-sessions/groups/<chat_id>_<uid>.json`,
+  separate from the private-chat files. The idle re-engagement loop never touches group files.
+- **Context.** If a member replies to someone else's message, that message is passed to the
+  teacher as conversational context so it can judge idiomaticity. Replying to the bot's own
+  last correction opens a follow-up question (tutor mode).
+- **Level.** Group members are graded at `teacher.group_level` by default; any member can set
+  their own level with `/level <A1–C2>` (stored in their per-member file, resets their Lehrer
+  session).
+- **Access control.** The bot only operates in groups whose chat ID is listed in
+  `bot.allowed_chats`; it stays silent everywhere else. Private chats remain gated by
+  `bot.allowed_users`.
+- **v1 limits.** Voice notes are ignored in groups; friend/rewind/onboarding commands are
+  hidden and inert in groups.
+
+### ⚠️ Required: disable Group Privacy in BotFather
+
+By default a Telegram bot in **privacy mode** only receives commands, @mentions, and replies
+to its own messages — so it would *not* see ordinary member chatter and could not correct it.
+You must turn privacy off:
+
+> BotFather → `/mybots` → select your bot → **Bot Settings → Group Privacy → Turn off**
+
+Then **remove and re-add** the bot to any existing group (privacy state is captured at join
+time). Making the bot a group admin also disables privacy. Without this, group mode does
+nothing. Add the group's chat ID to `bot.allowed_chats` in `config.yaml`.
 
 ## Adapting to a different use case
 

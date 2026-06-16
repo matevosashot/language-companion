@@ -9,12 +9,14 @@ from telegram.ext import Application, ContextTypes
 
 from .claude_runner import run_claude
 from .config import (
+    ALLOWED_CHATS,
     ALLOWED_USERS,
     FRIEND_DEFAULT_LEVEL,
     FRIEND_HISTORY_MAX,
     FRIEND_MODEL,
     FRIEND_TOOLS,
     FRIEND_WORKDIR,
+    TEACHER_GROUP_LEVEL,
     TEACHER_MODEL,
     TEACHER_TOOLS,
     TEACHER_WORKDIR,
@@ -28,8 +30,8 @@ from .friend import (
     cancel_pending_friend,
     friend_turn,
 )
-from .sessions import load_user, now_iso, save_user
-from .teacher import teacher_followup_turn, teacher_turn
+from .sessions import VALID_LEVELS, load_user, now_iso, save_user
+from .teacher import GROUP_KONTEXT_LABEL, teacher_followup_turn, teacher_turn
 
 INVALID_REPLY_MSG = (
     "❌ Antworten gehen nur an die letzte Lehrer-Korrektur. "
@@ -44,6 +46,16 @@ def is_allowed(update: Update) -> bool:
         return True
     uid = update.effective_user.id if update.effective_user else None
     return uid in ALLOWED_USERS
+
+
+def is_group_chat(update: Update) -> bool:
+    chat = update.effective_chat
+    return bool(chat) and chat.type in ("group", "supergroup")
+
+
+def is_allowed_chat(update: Update) -> bool:
+    cid = update.effective_chat.id if update.effective_chat else None
+    return cid in ALLOWED_CHATS
 
 
 # ============================================================
@@ -146,8 +158,10 @@ async def dispatch_user_text(app: Application, user_id: int, chat_id: int,
     asyncio.create_task(_run_teacher())
 
 
-async def _run_followup_with_keeper(app: Application, user_id: int, chat_id: int,
-                                      message_id: int, text: str) -> None:
+async def _run_with_teacher_keeper(app: Application, chat_id: int, coro) -> None:
+    """Run a teacher-only coroutine while showing the 'choose_sticker' action.
+    The friend event is pre-set so the keeper skips straight to the teacher
+    phase — used for follow-ups and for all group-chat turns (no friend)."""
     friend_done = asyncio.Event()
     friend_done.set()
     teacher_done = asyncio.Event()
@@ -155,13 +169,22 @@ async def _run_followup_with_keeper(app: Application, user_id: int, chat_id: int
         chat_action_keeper(app, chat_id, friend_done, teacher_done)
     )
     try:
-        await teacher_followup_turn(app, user_id, chat_id, message_id, text)
+        await coro
     finally:
         teacher_done.set()
         try:
             await keeper
         except asyncio.CancelledError:
             pass
+
+
+async def _run_followup_with_keeper(app: Application, user_id: int, chat_id: int,
+                                      message_id: int, text: str,
+                                      state_chat_id: int | None = None) -> None:
+    await _run_with_teacher_keeper(
+        app, chat_id,
+        teacher_followup_turn(app, user_id, chat_id, message_id, text, state_chat_id),
+    )
 
 
 async def handle_user_text(app: Application, update: Update, text: str) -> None:
@@ -199,7 +222,59 @@ async def handle_user_text(app: Application, update: Update, text: str) -> None:
     await dispatch_user_text(app, user_id, chat_id, message_id, text)
 
 
+async def handle_group_text(app: Application, update: Update, text: str) -> None:
+    """Teacher-only entry point for group chats. The friend persona never runs.
+    Each member's teacher state is isolated per (group, user). Corrects every
+    member message inline (or 👀 when fine); replies to another member's
+    message use that message as context; replies to the teacher's own last
+    correction become a follow-up."""
+    sender = update.effective_user
+    if sender is None or sender.is_bot or not text:
+        return
+    user_id = sender.id
+    chat_id = update.effective_chat.id
+    message_id = update.message.message_id
+    replied = update.message.reply_to_message
+
+    user = load_user(user_id, chat_id)
+    last_teacher_id = user.get("last_teacher_message_id")
+    # Per-member /level choice wins; otherwise the configured group default.
+    level = user.get("user_level") or TEACHER_GROUP_LEVEL
+
+    if replied is not None:
+        replied_from = replied.from_user
+        if (replied_from is not None and replied_from.is_bot
+                and last_teacher_id and replied.message_id == last_teacher_id):
+            # Member is following up on their own last correction.
+            asyncio.create_task(_run_followup_with_keeper(
+                app, user_id, chat_id, message_id, text, state_chat_id=chat_id
+            ))
+            return
+        # Replying to another human (or an older bot message): treat the
+        # replied-to text as conversational context for the correction.
+        context_text = (replied.text or "").strip() or None
+        asyncio.create_task(_run_with_teacher_keeper(
+            app, chat_id,
+            teacher_turn(app, user_id, chat_id, message_id, text,
+                         state_chat_id=chat_id, context_text=context_text,
+                         level=level, kontext_label=GROUP_KONTEXT_LABEL),
+        ))
+        return
+
+    asyncio.create_task(_run_with_teacher_keeper(
+        app, chat_id,
+        teacher_turn(app, user_id, chat_id, message_id, text,
+                     state_chat_id=chat_id, level=level,
+                     kontext_label=GROUP_KONTEXT_LABEL),
+    ))
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_group_chat(update):
+        if not is_allowed_chat(update):
+            return  # stay silent in non-allowlisted groups
+        await handle_group_text(context.application, update, update.message.text)
+        return
     if not is_allowed(update):
         await update.message.reply_text("Nicht autorisiert.")
         return
@@ -210,8 +285,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /new_teacher
 # ============================================================
 
+def _state_chat_id(update: Update) -> int | None:
+    """Group-scoped state key for the teacher; None in private chats."""
+    return update.effective_chat.id if is_group_chat(update) else None
+
+
+def _teacher_authorized(update: Update) -> bool:
+    return is_allowed_chat(update) if is_group_chat(update) else is_allowed(update)
+
+
 async def teacher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
+    if not _teacher_authorized(update):
         return
     text = " ".join(context.args or []).strip()
     if not text:
@@ -225,17 +309,43 @@ async def teacher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.effective_chat.id,
         update.message.message_id,
         text,
+        state_chat_id=_state_chat_id(update),
     ))
 
 
 async def new_teacher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
+    if not _teacher_authorized(update):
         return
-    user = load_user(update.effective_user.id)
+    state_chat_id = _state_chat_id(update)
+    user = load_user(update.effective_user.id, state_chat_id)
     user["teacher"] = None
     user["last_teacher_message_id"] = None
-    save_user(update.effective_user.id, user)
+    save_user(update.effective_user.id, user, state_chat_id)
     await update.message.reply_text("Lehrer-Session zurückgesetzt.")
+
+
+async def level_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set the CEFR level the teacher grades against, then reset the teacher
+    session so the new calibration starts clean. Works in private chats and in
+    groups (scoped per member)."""
+    if not _teacher_authorized(update):
+        return
+    arg = (context.args[0] if context.args else "").strip().upper()
+    if arg not in VALID_LEVELS:
+        levels = " / ".join(sorted(VALID_LEVELS))
+        await update.message.reply_text(f"Benutzung: /level <{levels}>")
+        return
+    state_chat_id = _state_chat_id(update)
+    user_id = update.effective_user.id
+    user = load_user(user_id, state_chat_id)
+    user["user_level"] = arg
+    user["teacher"] = None
+    user["last_teacher_message_id"] = None
+    save_user(user_id, user, state_chat_id)
+    await update.message.reply_text(
+        f"Niveau auf {arg} gesetzt. Lehrer-Session zurückgesetzt — "
+        "die nächste Nachricht wird auf diesem Niveau korrigiert."
+    )
 
 
 # ============================================================
@@ -258,6 +368,8 @@ RELOAD_PROMPT = (
 
 
 async def reload_friend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_group_chat(update):
+        return  # friend persona is disabled in groups
     if not is_allowed(update):
         return
     user_id = update.effective_user.id
@@ -288,6 +400,8 @@ async def reload_friend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reload_teacher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_group_chat(update):
+        return  # /reload* are private-only; use /new_teacher in groups
     if not is_allowed(update):
         return
     user_id = update.effective_user.id
@@ -338,6 +452,8 @@ def _human_delta(ts_iso: str) -> str:
 
 
 async def rewind_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_group_chat(update):
+        return  # rewind targets the friend, which is disabled in groups
     if not is_allowed(update):
         return
     user_id = update.effective_user.id
@@ -378,6 +494,8 @@ async def rewind_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def rewind_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    if is_group_chat(update):
+        return
     if not is_allowed(update):
         return
     if not q.data or not q.data.startswith("rw:"):
@@ -440,9 +558,25 @@ async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
+    if not _teacher_authorized(update):
         return
     user_id = update.effective_user.id
+
+    if is_group_chat(update):
+        user = load_user(user_id, update.effective_chat.id)
+        teacher = user.get("teacher")
+        chosen = user.get("user_level")
+        level = chosen or TEACHER_GROUP_LEVEL
+        level_src = "selbst gewählt" if chosen else "Gruppen-Standard"
+        await update.message.reply_text(
+            f"User ID: {user_id}\n"
+            f"Modus: Gruppe (nur Lehrer)\n"
+            f"Dein Niveau: {level} ({level_src})\n"
+            f"Freund: n/a (Gruppe)\n"
+            f"Lehrer-Session: {'aktiv' if teacher else 'leer'}"
+        )
+        return
+
     user = load_user(user_id)
     history = user.get("friend_history") or []
     profile = user.get("friend_profile") or DEFAULT_PROFILE
