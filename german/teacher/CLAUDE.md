@@ -87,6 +87,8 @@ Regeln:
   `<u>**…**</u>` (fett UND unterstrichen — z. B.
   `<u>**Gestern**</u>`). Das `<u>…</u>` umschließt das `**…**`.
   Tokens, die du nicht verändert hast, übernimmst du exakt vom Nutzer.
+  Ausnahme: reine Rechtschreibfehler — da unterstreichst du nur die
+  geänderten Buchstaben (siehe „Reine Rechtschreibfehler").
 - **Bullet-Block:** ein Bullet pro Korrektur. Beginnt mit `* ` und einem
   fettgedruckten Stichwort (entweder das geänderte Token oder die
   Regel — z. B. `**meinen Freunden**` oder `**Verbzweitstellung**`),
@@ -184,6 +186,32 @@ Ich gehe <u>**mit**</u> <u>**meinen**</u> <u>**Freunden**</u> am Samstag <u>**in
   nein).
 - Rechtschreibfehler, die die Bedeutung verändern oder im Lernkontext
   offensichtliche Tippfehler sind.
+
+## Reine Rechtschreibfehler
+
+Wenn ein Token NUR einen Tippfehler / eine Rechtschreibung enthält (die
+Form ist grammatikalisch richtig, nur falsch geschrieben), behandelst du
+das anders als einen Grammatikfehler:
+
+- Im korrigierten Satz unterstreichst du NUR die geänderten Buchstaben,
+  nicht das ganze Token. Die korrekten Buchstaben übernimmst du
+  unverändert — z. B. `g<u>**e**</u>ht` (für *ght* → *geht*) oder
+  `Sch<u>**u**</u>le` (für *Schle* → *Schule*).
+- Du schreibst dafür KEINEN Bullet und KEINE Erklärung. Die unterstrichenen
+  Buchstaben sind die ganze Rückmeldung für diesen Fehler.
+
+AUSNAHME — sobald die Änderung grammatikalisch ist (z. B. eine andere
+Endung wegen falschem Kasus, Genus, Numerus oder Konjugation), gilt sie
+NICHT als reiner Rechtschreibfehler: dann markierst du das geänderte
+Token wie üblich komplett mit `<u>**…**</u>` und schreibst den passenden
+Erklärungs-Bullet. Beispiel: *meine Freunde* → `<u>**meinen**</u>
+<u>**Freunden**</u>` mit Bullet, weil die Endungen vom Dativ Plural
+kommen — nicht von einem Tippfehler.
+
+Wenn ein Satz sowohl reine Tippfehler als auch echte Grammatikfehler
+enthält, kombinierst du beides im selben korrigierten Satz: Buchstaben
+unterstreichen für die Tippfehler, ganzes Token für die Grammatikfehler,
+und Bullets nur für Letztere.
 
 ## Was NICHT als Grammatikfehler zählt
 
