@@ -23,8 +23,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_group_chat(update):
         return  # v1: voice notes are ignored in groups (text-only)
     if not is_allowed(update):
-        await update.message.reply_text("Nicht autorisiert.")
-        return
+        return  # stay silent for unauthorized users; only /start responds
     if not VOICE_ENABLED:
         await update.message.reply_text(
             "Sprachnachrichten werden nicht unterstützt (mlx-whisper fehlt)."

@@ -18,6 +18,7 @@ from telegram.ext import (
 )
 
 BOT_COMMANDS = [
+    BotCommand("start", "Zugang / Chat-ID anzeigen"),
     BotCommand("profile", "Gesprächspartner (Freund) wählen/wechseln"),
     BotCommand("setup", "Aktuellen Freund einrichten"),
     BotCommand("reset", "Aktuellen Freund zurücksetzen"),
@@ -34,6 +35,7 @@ BOT_COMMANDS = [
 
 # Groups run teacher-only — friend/rewind/profile commands are hidden there.
 GROUP_BOT_COMMANDS = [
+    BotCommand("start", "Zugang / Chat-ID anzeigen"),
     BotCommand("teacher", "Frage an den Lehrer stellen"),
     BotCommand("reset_teacher", "Lehrer-Session zurücksetzen"),
     BotCommand("level", "Dein Deutsch-Niveau setzen (A1–C2)"),
@@ -41,8 +43,9 @@ GROUP_BOT_COMMANDS = [
     BotCommand("ping", "Erreichbarkeit prüfen"),
 ]
 
+from . import allowlist
 from .config import (
-    ALLOWED_USERS,
+    ADMIN_IDS,
     BOT_TOKEN,
     CFG,
     DEFAULT_FRIEND_PROFILE,
@@ -53,6 +56,10 @@ from .config import (
     VOICE_ENABLED,
 )
 from .handlers import (
+    admin_add_cmd,
+    admin_callback,
+    admin_cmd,
+    build_admin_handler,
     handle_message,
     level_cmd,
     ping_cmd,
@@ -66,6 +73,7 @@ from .handlers import (
     reset_teacher_cmd,
     rewind_callback,
     rewind_cmd,
+    start_cmd,
     status_cmd,
     teacher_cmd,
 )
@@ -97,9 +105,21 @@ def main():
     if not (Path(TEACHER_WORKDIR) / "CLAUDE.md").exists():
         raise SystemExit(f"Missing {Path(TEACHER_WORKDIR) / 'CLAUDE.md'}")
 
+    allowlist.load()
+    if not ADMIN_IDS:
+        logger.warning(
+            "No bot.admin_ids configured — nobody can manage the allowlist or "
+            "use the bot except already-allowed chat_ids."
+        )
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(build_onboarding_handler())
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CommandHandler("admin_add", admin_add_cmd))
+    app.add_handler(build_admin_handler())  # before admin_callback: claims adm:add
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^adm:"))
     app.add_handler(CommandHandler("profile", profile_cmd))
     app.add_handler(CallbackQueryHandler(profile_callback, pattern=r"^prof:"))
     app.add_handler(CommandHandler("reset", reset_cmd))
@@ -141,6 +161,7 @@ def main():
     ) or "(none)")
     print("  Lehrer-Workdir:", TEACHER_WORKDIR)
     print("  Lehrer-Model  :", TEACHER_MODEL or "(default)")
-    print("  Allowed users :", ALLOWED_USERS or "everyone")
+    print("  Admins        :", ADMIN_IDS or "(none!)")
+    print("  Allowed chats :", len(allowlist.items()))
     print("  Voice         :", "on" if VOICE_ENABLED else "off")
     app.run_polling(drop_pending_updates=True)

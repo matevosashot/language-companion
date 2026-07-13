@@ -24,8 +24,12 @@ _load_env(SCRIPT_DIR / ".env")
 CFG = yaml.safe_load((SCRIPT_DIR / "config.yaml").read_text())
 
 BOT_TOKEN = os.environ.get(CFG["bot"]["token_env"]) or os.environ.get("TELEGRAM_BOT_TOKEN")
-ALLOWED_USERS = set(CFG["bot"].get("allowed_users") or [])
-ALLOWED_CHATS = set(CFG["bot"].get("allowed_chats") or [])
+# Admins are always allowed and manage the allowlist; they are NOT stored in it.
+ADMIN_IDS = set(CFG["bot"].get("admin_ids") or [])
+# Everyone else must be an allowed chat_id, kept in this JSON file (not config).
+ALLOWLIST_FILE = SCRIPT_DIR / (
+    CFG["bot"].get("allowlist_file") or ".telegram-german-sessions/allowed_chats.json"
+)
 
 _CLAUDE = CFG["claude"]
 CLAUDE_PATH = _CLAUDE["path"]

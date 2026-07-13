@@ -1,6 +1,9 @@
 bot:
   token_env: LANGUAGE_COMPANION_BOT_TOKEN  # env var holding the bot token (falls back to TELEGRAM_BOT_TOKEN)
-  allowed_users: [123456789]         # Telegram user IDs allowed to use the bot
+  admin_ids: [123456789]             # Telegram user IDs that manage the allowlist (/admin, /admin_add). Always allowed.
+  # Everyone else is gated by a file-backed allowlist of chat_ids managed at runtime
+  # via /admin (new users get their chat_id from /start). NOT configured here.
+  # allowlist_file: .telegram-german-sessions/allowed_chats.json  # default path
 
 claude:
   path: claude                       # CLI binary

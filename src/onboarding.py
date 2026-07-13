@@ -133,8 +133,7 @@ async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return ConversationHandler.END
     if not is_allowed(update):
-        await update.message.reply_text("Nicht autorisiert.")
-        return ConversationHandler.END
+        return ConversationHandler.END  # silent for unauthorized users
     return await _start_setup(context, update.effective_user.id, update.effective_chat.id)
 
 
