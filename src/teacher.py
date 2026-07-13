@@ -16,12 +16,17 @@ from .config import (
     TEACHER_WORKDIR,
 )
 from .markdown import to_telegram_html
-from .sessions import load_user, save_user
+from .sessions import load_user, profile_state, save_user
 
 logger = logging.getLogger(__name__)
 
 FRIEND_KONTEXT_LABEL = "letzte Nachricht von Klaus, dem Freund"
 GROUP_KONTEXT_LABEL = "vorherige Nachricht im Chat"
+
+# How many recent teacher corrections stay repliable. Older ones fall out of
+# the window and replies to them are rejected again.
+TEACHER_MSG_HISTORY_MAX = 30
+QUOTED_CORRECTION_MAX = 700
 
 
 def build_teacher_prompt(context_text: Optional[str], user_message: str,
@@ -42,7 +47,19 @@ def build_teacher_prompt(context_text: Optional[str], user_message: str,
     )
 
 
-def build_followup_prompt(user_message: str) -> str:
+def build_followup_prompt(user_message: str,
+                           quoted_correction: str | None = None) -> str:
+    if quoted_correction:
+        quoted = quoted_correction.strip()[:QUOTED_CORRECTION_MAX]
+        return (
+            "[NACHFRAGE — Folgefrage des Nutzers zu einer FRÜHEREN Korrektur, "
+            "nicht zur letzten]\n"
+            "[BEZUG — der Nutzer antwortet auf genau diese deiner früheren "
+            "Korrekturen:]\n"
+            f"{quoted}\n\n"
+            "[FRAGE DES NUTZERS]\n"
+            f"{user_message}"
+        )
     return (
         "[NACHFRAGE — Folgefrage des Nutzers zur letzten Korrektur]\n"
         f"{user_message}"
@@ -65,6 +82,10 @@ async def _send_teacher_reply(app: Application, user_id: int, chat_id: int,
         return
     user = load_user(user_id, state_chat_id)
     user["last_teacher_message_id"] = sent.message_id
+    ids = [i for i in (user.get("teacher_message_ids") or [])
+           if i != sent.message_id]
+    ids.append(sent.message_id)
+    user["teacher_message_ids"] = ids[-TEACHER_MSG_HISTORY_MAX:]
     save_user(user_id, user, state_chat_id)
 
 
@@ -76,10 +97,10 @@ async def teacher_turn(app: Application, user_id: int, chat_id: int,
                         kontext_label: str = FRIEND_KONTEXT_LABEL) -> None:
     user = load_user(user_id, state_chat_id)
     sid = user.get("teacher")
-    # Private: the friend's last reply is the context. Group: the explicit
-    # context_text (the human message being replied to), if any.
+    # Private: the active friend profile's last reply is the context. Group: the
+    # explicit context_text (the human message being replied to), if any.
     if context_text is None and state_chat_id is None:
-        context_text = user.get("last_friend_reply")
+        context_text = profile_state(user).get("last_reply")
     if level is None:
         level = user.get("user_level") or TEACHER_DEFAULT_LEVEL
 
@@ -119,11 +140,12 @@ async def teacher_turn(app: Application, user_id: int, chat_id: int,
 
 async def teacher_followup_turn(app: Application, user_id: int, chat_id: int,
                                   message_id: int, text: str,
-                                  state_chat_id: int | None = None) -> None:
+                                  state_chat_id: int | None = None,
+                                  quoted_correction: str | None = None) -> None:
     user = load_user(user_id, state_chat_id)
     sid = user.get("teacher")
 
-    prompt = build_followup_prompt(text)
+    prompt = build_followup_prompt(text, quoted_correction)
     result = await run_claude(prompt, TEACHER_WORKDIR, sid, TEACHER_TOOLS, model=TEACHER_MODEL)
     if result.expired and sid:
         result = await run_claude(prompt, TEACHER_WORKDIR, None, TEACHER_TOOLS, model=TEACHER_MODEL)

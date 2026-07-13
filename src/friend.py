@@ -1,4 +1,10 @@
-"""Friend persona: prompt building, per-user pending-turn state, friend_turn."""
+"""Friend persona: prompt building, per-user pending-turn state, friend_turn.
+
+The active friend is one of several selectable *profiles* (see config.py). Each
+profile has its own workdir/CLAUDE.md and its own Claude session, stored under
+the user's `friend_profiles[<id>]`. friend_turn resolves the active profile and
+operates entirely on that profile's slice of session state.
+"""
 
 import asyncio
 import logging
@@ -9,9 +15,9 @@ from typing import Optional
 from telegram.ext import Application
 
 from .claude_runner import run_claude
-from .config import FRIEND_DEFAULT_LEVEL, FRIEND_HISTORY_MAX, FRIEND_MODEL, FRIEND_TOOLS, FRIEND_WORKDIR
+from .config import FRIEND_DEFAULT_LEVEL, FRIEND_HISTORY_MAX, friend_profile
 from .markdown import to_telegram_html
-from .sessions import load_user, now_iso, save_user
+from .sessions import active_profile_id, load_user, now_iso, profile_state, save_user
 
 logger = logging.getLogger(__name__)
 
@@ -20,36 +26,45 @@ logger = logging.getLogger(__name__)
 FRIEND_MSG_ID_MAX = 100
 
 
-DEFAULT_PROFILE = {
-    "name": "Klaus", "age": 34, "gender": "männlich",
-    "city": "Leipzig", "extras": "",
-}
-
-PROFILE_PREFIX = (
-    "[PROFIL — lies das einmal still und bleib dann durchgehend in dieser Rolle]\n"
-    "Name: {name}\n"
-    "Alter: {age}\n"
-    "Geschlecht: {gender}\n"
-    "Stadt: {city}\n"
-    "Besonderheiten: {extras}\n\n"
+LEVEL_GUIDANCE = (
     "[NUTZER-NIVEAU] {level} (CEFR) — passe Wortschatz und Satzbau "
     "entsprechend an. Bei A1/A2 einfache Sätze und gebräuchliche Wörter; "
     "bei B1/B2 normales Gesprächsdeutsch; bei C1/C2 darfst du auch "
-    "anspruchsvolle Wendungen und Dialektnuancen einbauen.\n\n"
-    "Folge CLAUDE.md (lies sie still einmal) und sprich ab jetzt als diese "
-    "Person mit mir. Antworte auf die folgende Nachricht:\n---\n{msg}"
+    "anspruchsvolle Wendungen und Dialektnuancen einbauen."
 )
 
 
-def build_friend_first_message(profile: dict, level: str, msg: str) -> str:
-    return PROFILE_PREFIX.format(
-        name=profile.get("name") or DEFAULT_PROFILE["name"],
-        age=profile.get("age") or DEFAULT_PROFILE["age"],
-        gender=profile.get("gender") or DEFAULT_PROFILE["gender"],
-        city=profile.get("city") or DEFAULT_PROFILE["city"],
-        extras=profile.get("extras") or "(keine)",
-        level=level or FRIEND_DEFAULT_LEVEL,
-        msg=msg,
+def _profil_block(profile_meta, answers: dict | None) -> str:
+    """Render the onboarding answers as a [PROFIL] block the CLAUDE.md expects.
+    Uses each question's `label` for the line key. Empty if no answers."""
+    if not answers:
+        return ""
+    labels = {q["id"]: (q.get("label") or q["id"])
+              for q in (profile_meta.onboarding or []) if "id" in q}
+    lines = []
+    for key, val in answers.items():
+        if val in (None, ""):
+            continue
+        lines.append(f"{labels.get(key, key)}: {val}")
+    if not lines:
+        return ""
+    return (
+        "[PROFIL — lies das einmal still und bleib dann durchgehend in dieser Rolle]\n"
+        + "\n".join(lines)
+        + "\n\n"
+    )
+
+
+def build_friend_first_message(profile_meta, answers: dict | None,
+                                level: str, msg: str) -> str:
+    """First message of a fresh session: profile block (if any) + level guidance
+    + the instruction to follow CLAUDE.md, then the user's message."""
+    return (
+        _profil_block(profile_meta, answers)
+        + LEVEL_GUIDANCE.format(level=level or FRIEND_DEFAULT_LEVEL)
+        + "\n\nFolge CLAUDE.md (lies sie still einmal) und sprich ab jetzt als "
+          "diese Person mit mir. Antworte auf die folgende Nachricht:\n---\n"
+        + msg
     )
 
 
@@ -88,26 +103,30 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
         return
     try:
         user = load_user(user_id)
-        history = user.get("friend_history") or []
+        pid = active_profile_id(user)
+        meta = friend_profile(pid)
+        st = profile_state(user, pid)
+        history = st.get("history") or []
         cur_sid = history[-1]["sid"] if history else None
-        profile = user.get("friend_profile") or DEFAULT_PROFILE
-        level = user.get("user_level") or FRIEND_DEFAULT_LEVEL
+        answers = st.get("answers")
+        level = user.get("user_level") or meta.level or FRIEND_DEFAULT_LEVEL
 
         combined = "\n---\n".join(pending.queued)
         excerpt = pending.excerpt or (pending.queued[0][:60] if pending.queued else "")
 
-        prompt = combined if cur_sid else build_friend_first_message(profile, level, combined)
+        prompt = combined if cur_sid else build_friend_first_message(meta, answers, level, combined)
 
-        result = await run_claude(prompt, FRIEND_WORKDIR, cur_sid, FRIEND_TOOLS, pending.proc_holder, FRIEND_MODEL)
+        result = await run_claude(prompt, meta.workdir, cur_sid, meta.tools, pending.proc_holder, meta.model)
 
         if result.cancelled:
             return
 
+        expired_restart = False
         if result.expired and cur_sid:
-            logger.info("Friend session %s expired, restarting fresh", cur_sid)
-            user["friend_history"] = []
-            prompt = build_friend_first_message(profile, level, combined)
-            result = await run_claude(prompt, FRIEND_WORKDIR, None, FRIEND_TOOLS, pending.proc_holder, FRIEND_MODEL)
+            logger.info("Friend session %s (profile %s) expired, restarting fresh", cur_sid, pid)
+            expired_restart = True
+            prompt = build_friend_first_message(meta, answers, level, combined)
+            result = await run_claude(prompt, meta.workdir, None, meta.tools, pending.proc_holder, meta.model)
             if result.cancelled:
                 return
 
@@ -119,7 +138,8 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
             return
 
         user = load_user(user_id)
-        history = user.get("friend_history") or []
+        st = profile_state(user, pid)
+        history = [] if expired_restart else (st.get("history") or [])
         if result.session_id:
             history.append({
                 "sid": result.session_id,
@@ -128,11 +148,11 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
             })
             if len(history) > FRIEND_HISTORY_MAX:
                 history = history[-FRIEND_HISTORY_MAX:]
-            user["friend_history"] = history
+            st["history"] = history
         user["chat_id"] = chat_id
         user["last_message_ts"] = now_iso()
         user["idle_ping_sent_at"] = None
-        user["last_friend_reply"] = result.text
+        st["last_reply"] = result.text
         save_user(user_id, user)
 
         reply_html = to_telegram_html(result.text)
@@ -143,9 +163,10 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
         )
 
         user = load_user(user_id)
-        ids = user.get("friend_message_ids") or []
+        st = profile_state(user, pid)
+        ids = st.get("message_ids") or []
         ids.append(sent.message_id)
-        user["friend_message_ids"] = ids[-FRIEND_MSG_ID_MAX:]
+        st["message_ids"] = ids[-FRIEND_MSG_ID_MAX:]
         save_user(user_id, user)
 
     except asyncio.CancelledError:

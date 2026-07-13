@@ -11,26 +11,32 @@ from .claude_runner import run_claude
 from .config import (
     ALLOWED_CHATS,
     ALLOWED_USERS,
+    DEFAULT_FRIEND_PROFILE,
     FRIEND_DEFAULT_LEVEL,
     FRIEND_HISTORY_MAX,
-    FRIEND_MODEL,
-    FRIEND_TOOLS,
-    FRIEND_WORKDIR,
+    FRIEND_PROFILES,
     TEACHER_GROUP_LEVEL,
     TEACHER_MODEL,
     TEACHER_TOOLS,
     TEACHER_WORKDIR,
     VOICE_ENABLED,
+    friend_profile,
 )
 from .friend import (
-    DEFAULT_PROFILE,
     PENDING_FRIEND,
     PendingFriend,
     USER_LOCKS,
     cancel_pending_friend,
     friend_turn,
 )
-from .sessions import VALID_LEVELS, load_user, now_iso, save_user
+from .sessions import (
+    VALID_LEVELS,
+    active_profile_id,
+    load_user,
+    now_iso,
+    profile_state,
+    save_user,
+)
 from .teacher import GROUP_KONTEXT_LABEL, teacher_followup_turn, teacher_turn
 
 INVALID_REPLY_MSG = (
@@ -180,10 +186,12 @@ async def _run_with_teacher_keeper(app: Application, chat_id: int, coro) -> None
 
 async def _run_followup_with_keeper(app: Application, user_id: int, chat_id: int,
                                       message_id: int, text: str,
-                                      state_chat_id: int | None = None) -> None:
+                                      state_chat_id: int | None = None,
+                                      quoted_correction: str | None = None) -> None:
     await _run_with_teacher_keeper(
         app, chat_id,
-        teacher_followup_turn(app, user_id, chat_id, message_id, text, state_chat_id),
+        teacher_followup_turn(app, user_id, chat_id, message_id, text,
+                              state_chat_id, quoted_correction=quoted_correction),
     )
 
 
@@ -199,12 +207,24 @@ async def handle_user_text(app: Application, update: Update, text: str) -> None:
     if replied is not None:
         user = load_user(user_id)
         last_teacher_id = user.get("last_teacher_message_id")
-        if last_teacher_id and replied.message_id == last_teacher_id:
+        teacher_ids = user.get("teacher_message_ids") or []
+        is_teacher_reply = replied.message_id in teacher_ids or (
+            last_teacher_id and replied.message_id == last_teacher_id
+        )
+        if is_teacher_reply:
+            # When the user replies to an older correction (not the latest one),
+            # quote it so the teacher knows which correction the follow-up means.
+            quoted_correction = None
+            if replied.message_id != last_teacher_id:
+                quoted_correction = (replied.text or "").strip() or None
             asyncio.create_task(
-                _run_followup_with_keeper(app, user_id, chat_id, message_id, text)
+                _run_followup_with_keeper(
+                    app, user_id, chat_id, message_id, text,
+                    quoted_correction=quoted_correction,
+                )
             )
             return
-        friend_ids = user.get("friend_message_ids") or []
+        friend_ids = profile_state(user).get("message_ids") or []
         if replied.message_id in friend_ids:
             # Replying to the friend's latest message is just the natural next
             # turn — dispatch normally, no quote. Replying to an older friend
@@ -238,16 +258,25 @@ async def handle_group_text(app: Application, update: Update, text: str) -> None
 
     user = load_user(user_id, chat_id)
     last_teacher_id = user.get("last_teacher_message_id")
+    teacher_ids = user.get("teacher_message_ids") or []
     # Per-member /level choice wins; otherwise the configured group default.
     level = user.get("user_level") or TEACHER_GROUP_LEVEL
 
     if replied is not None:
         replied_from = replied.from_user
-        if (replied_from is not None and replied_from.is_bot
-                and last_teacher_id and replied.message_id == last_teacher_id):
-            # Member is following up on their own last correction.
+        is_teacher_reply = replied_from is not None and replied_from.is_bot and (
+            replied.message_id in teacher_ids
+            or (last_teacher_id and replied.message_id == last_teacher_id)
+        )
+        if is_teacher_reply:
+            # Member is following up on one of their own corrections. Quote the
+            # specific one when it isn't the latest.
+            quoted_correction = None
+            if replied.message_id != last_teacher_id:
+                quoted_correction = (replied.text or "").strip() or None
             asyncio.create_task(_run_followup_with_keeper(
-                app, user_id, chat_id, message_id, text, state_chat_id=chat_id
+                app, user_id, chat_id, message_id, text, state_chat_id=chat_id,
+                quoted_correction=quoted_correction,
             ))
             return
         # Replying to another human (or an older bot message): treat the
@@ -282,7 +311,121 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# /new_teacher
+# /profile — pick / switch the friend persona
+# ============================================================
+
+def _profile_needs_setup(user: dict, pid: str) -> bool:
+    """True if the profile defines onboarding questions but has no saved answers."""
+    meta = friend_profile(pid)
+    if not meta.onboarding:
+        return False
+    return not (profile_state(user, pid).get("answers"))
+
+
+async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_group_chat(update):
+        return  # friend is private-only
+    if not is_allowed(update):
+        return
+    user = load_user(update.effective_user.id)
+    active = active_profile_id(user)
+    rows = []
+    for pid, meta in FRIEND_PROFILES.items():
+        mark = "✓ " if pid == active else ""
+        rows.append([InlineKeyboardButton(f"{mark}{meta.label}", callback_data=f"prof:{pid}")])
+    await update.message.reply_text(
+        "Mit wem willst du sprechen?",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if is_group_chat(update) or not is_allowed(update):
+        return
+    if not q.data or not q.data.startswith("prof:"):
+        return
+    pid = q.data.split(":", 1)[1]
+    if pid not in FRIEND_PROFILES:
+        await q.edit_message_text("Dieses Profil gibt es nicht mehr.")
+        return
+    user_id = q.from_user.id
+    await cancel_pending_friend(user_id)
+    user = load_user(user_id)
+    user["active_friend_profile"] = pid
+    save_user(user_id, user)
+    meta = friend_profile(pid)
+
+    if _profile_needs_setup(user, pid):
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚙️ Jetzt einrichten", callback_data="onbsetup"),
+        ]])
+        await q.edit_message_text(
+            f"Du sprichst jetzt mit {meta.label}.\n"
+            "Dieser Freund braucht noch ein kurzes Setup — /setup oder Knopf unten.",
+            reply_markup=kb,
+        )
+        return
+    await q.edit_message_text(
+        f"Du sprichst jetzt mit {meta.label}. Schreib was, dann geht's los."
+    )
+
+
+# ============================================================
+# /reset — reset the active friend profile's session
+# ============================================================
+
+RESET_KB = InlineKeyboardMarkup([[
+    InlineKeyboardButton("Ja, zurücksetzen", callback_data="rstf:yes"),
+    InlineKeyboardButton("Abbrechen",        callback_data="rstf:no"),
+]])
+
+
+async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_group_chat(update):
+        return  # friend is private-only
+    if not is_allowed(update):
+        return
+    user = load_user(update.effective_user.id)
+    meta = friend_profile(active_profile_id(user))
+    await update.message.reply_text(
+        f"Das setzt deinen aktuellen Freund ({meta.label}) zurück. "
+        "Der Gesprächsverlauf geht verloren, das Profil bleibt.\n\n"
+        "Wirklich zurücksetzen?",
+        reply_markup=RESET_KB,
+    )
+
+
+async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if is_group_chat(update) or not is_allowed(update):
+        return
+    if not q.data or not q.data.startswith("rstf:"):
+        return
+    if q.data == "rstf:no":
+        await q.edit_message_text("Abgebrochen. Alles bleibt wie es war.")
+        return
+    if q.data != "rstf:yes":
+        return
+    user_id = q.from_user.id
+    await cancel_pending_friend(user_id)
+    user = load_user(user_id)
+    pid = active_profile_id(user)
+    st = profile_state(user, pid)
+    st["history"] = []
+    st["last_reply"] = None
+    st["message_ids"] = []
+    save_user(user_id, user)
+    meta = friend_profile(pid)
+    await q.edit_message_text(
+        f"⏮ {meta.label} fängt beim nächsten Mal frisch an (gleiches Profil)."
+    )
+
+
+# ============================================================
+# /reset_teacher
 # ============================================================
 
 def _state_chat_id(update: Update) -> int | None:
@@ -313,13 +456,14 @@ async def teacher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ))
 
 
-async def new_teacher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def reset_teacher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _teacher_authorized(update):
         return
     state_chat_id = _state_chat_id(update)
     user = load_user(update.effective_user.id, state_chat_id)
     user["teacher"] = None
     user["last_teacher_message_id"] = None
+    user["teacher_message_ids"] = []
     save_user(update.effective_user.id, user, state_chat_id)
     await update.message.reply_text("Lehrer-Session zurückgesetzt.")
 
@@ -341,6 +485,7 @@ async def level_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user["user_level"] = arg
     user["teacher"] = None
     user["last_teacher_message_id"] = None
+    user["teacher_message_ids"] = []
     save_user(user_id, user, state_chat_id)
     await update.message.reply_text(
         f"Niveau auf {arg} gesetzt. Lehrer-Session zurückgesetzt — "
@@ -374,7 +519,9 @@ async def reload_friend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_id = update.effective_user.id
     user = load_user(user_id)
-    history = user.get("friend_history") or []
+    pid = active_profile_id(user)
+    meta = friend_profile(pid)
+    history = profile_state(user, pid).get("history") or []
     if not history:
         await update.message.reply_text(
             "Noch keine Freund-Session aktiv — die nächste Nachricht lädt "
@@ -385,16 +532,17 @@ async def reload_friend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cancel_pending_friend(user_id)
     cur_sid = history[-1]["sid"]
     status = await update.message.reply_text("🔄 Freund liest CLAUDE.md neu…")
-    result = await run_claude(RELOAD_PROMPT, FRIEND_WORKDIR, cur_sid, FRIEND_TOOLS, model=FRIEND_MODEL)
+    result = await run_claude(RELOAD_PROMPT, meta.workdir, cur_sid, meta.tools, model=meta.model)
     if result.cancelled or result.error or not result.session_id:
         await status.edit_text(f"Reload fehlgeschlagen: {result.error or 'unbekannt'}")
         return
 
     user = load_user(user_id)
-    history = user.get("friend_history") or []
+    st = profile_state(user, pid)
+    history = st.get("history") or []
     if history:
         history[-1] = {**history[-1], "sid": result.session_id, "ts": now_iso()}
-        user["friend_history"] = history
+        st["history"] = history
         save_user(user_id, user)
     await status.edit_text("✅ Freund hat CLAUDE.md neu gelesen.")
 
@@ -460,7 +608,7 @@ async def rewind_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
 
     user = load_user(user_id)
-    history = user.get("friend_history") or []
+    history = profile_state(user).get("history") or []
 
     if args and args[0].lower() == "list":
         if not history:
@@ -507,10 +655,19 @@ async def rewind_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _perform_rewind(context, q.from_user.id, q.message.chat_id, n)
 
 
+def _friend_display_name(user: dict) -> str:
+    """Best display name for the active friend: the onboarded name if set,
+    otherwise the profile's label."""
+    answers = profile_state(user).get("answers") or {}
+    if answers.get("name"):
+        return answers["name"]
+    return friend_profile(active_profile_id(user)).label
+
+
 async def _perform_rewind(context: ContextTypes.DEFAULT_TYPE,
                            user_id: int, chat_id: int, n: int) -> None:
     user = load_user(user_id)
-    history = user.get("friend_history") or []
+    history = profile_state(user).get("history") or []
 
     async def reply(text: str) -> None:
         await context.bot.send_message(chat_id=chat_id, text=text)
@@ -531,13 +688,14 @@ async def _perform_rewind(context: ContextTypes.DEFAULT_TYPE,
     await cancel_pending_friend(user_id)
 
     user = load_user(user_id)
-    history = user.get("friend_history") or []
-    user["friend_history"] = history[:-n] if n < len(history) else []
-    user["last_friend_reply"] = None
+    st = profile_state(user)
+    history = st.get("history") or []
+    st["history"] = history[:-n] if n < len(history) else []
+    st["last_reply"] = None
     save_user(user_id, user)
 
-    name = (user.get("friend_profile") or DEFAULT_PROFILE).get("name", "Klaus")
-    if not user["friend_history"]:
+    name = _friend_display_name(user)
+    if not st["history"]:
         await reply(
             f"⏪ {n} Nachrichten zurückgespult. {name} fängt beim nächsten "
             "Mal frisch an (gleiches Profil)."
@@ -578,15 +736,23 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = load_user(user_id)
-    history = user.get("friend_history") or []
-    profile = user.get("friend_profile") or DEFAULT_PROFILE
+    pid = active_profile_id(user)
+    meta = friend_profile(pid)
+    st = profile_state(user, pid)
+    history = st.get("history") or []
     teacher = user.get("teacher")
     level = user.get("user_level") or FRIEND_DEFAULT_LEVEL
     in_flight = user_id in PENDING_FRIEND
+    if not meta.onboarding:
+        setup = "kein Setup nötig"
+    else:
+        setup = "ja" if st.get("answers") else "nein"
+    available = " · ".join(p.label for p in FRIEND_PROFILES.values()) or "(keine)"
     await update.message.reply_text(
         f"User ID: {user_id}\n"
-        f"Profil: {profile.get('name')}, {profile.get('age')}, "
-        f"{profile.get('gender')}, {profile.get('city')}\n"
+        f"Aktiver Freund: {meta.label}\n"
+        f"Verfügbare Profile: {available}\n"
+        f"Eingerichtet: {setup}\n"
         f"Dein Niveau: {level}\n"
         f"Freund-Historie: {len(history)}/{FRIEND_HISTORY_MAX}\n"
         f"Lehrer-Session: {'aktiv' if teacher else 'leer'}\n"

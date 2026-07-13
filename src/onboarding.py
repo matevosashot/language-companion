@@ -1,4 +1,11 @@
-"""Onboarding ConversationHandler for /new and /new_friend."""
+"""Generic, data-driven onboarding for the active friend profile.
+
+`/setup` (or the "⚙️ Einrichten" button from /profile) walks the questions
+declared in the active profile's profile.yaml. Each question is either free
+`text` (optionally validated / length-capped) or a `choice` with allowed
+answers shown as inline buttons. The collected answers are stored on the
+profile's session state and rendered into the friend's first-message [PROFIL]
+block (see friend.build_friend_first_message)."""
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -10,39 +17,115 @@ from telegram.ext import (
     filters,
 )
 
-from .config import FRIEND_DEFAULT_LEVEL
+from .config import friend_profile
 from .friend import cancel_pending_friend
 from .handlers import is_allowed, is_group_chat
-from .sessions import VALID_LEVELS, load_user, save_user
+from .sessions import active_profile_id, load_user, profile_state, save_user
 
-ONB_CONFIRM, ONB_NAME, ONB_AGE, ONB_GENDER, ONB_CITY, ONB_EXTRAS, ONB_LEVEL = range(7)
-
-CONFIRM_KB = InlineKeyboardMarkup([[
-    InlineKeyboardButton("Ja, neu starten", callback_data="onbc:yes"),
-    InlineKeyboardButton("Abbrechen",       callback_data="onbc:no"),
-]])
-
-GENDER_KB = InlineKeyboardMarkup([[
-    InlineKeyboardButton("Männlich", callback_data="g:männlich"),
-    InlineKeyboardButton("Weiblich", callback_data="g:weiblich"),
-    InlineKeyboardButton("Divers",  callback_data="g:divers"),
-]])
-
-LEVEL_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton(lv, callback_data=f"lv:{lv}") for lv in ("A1", "A2", "B1")],
-    [InlineKeyboardButton(lv, callback_data=f"lv:{lv}") for lv in ("B2", "C1", "C2")],
-])
+ONB_ASK = 0
 
 
-def _is_new_command(text: str) -> bool:
-    """True if the entry command was /new (not /new_friend)."""
-    if not text:
-        return False
-    first = text.split()[0].split("@")[0]
-    return first == "/new"
+def _current_q(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.user_data["onb_questions"][context.user_data["onb_idx"]]
 
 
-async def onb_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+def _validate(q: dict, raw: str):
+    """Return (value, error_message). value is None when error is set."""
+    raw = (raw or "").strip()
+    if not raw:
+        if q.get("optional"):
+            return "", None
+        return None, "Bitte etwas eingeben:"
+    if q.get("validate") == "int_range":
+        lo, hi = q.get("min"), q.get("max")
+        try:
+            n = int(raw)
+        except ValueError:
+            return None, f"Bitte eine Zahl zwischen {lo} und {hi} eingeben:"
+        if (lo is not None and n < lo) or (hi is not None and n > hi):
+            return None, f"Bitte eine Zahl zwischen {lo} und {hi} eingeben:"
+        return n, None
+    max_len = q.get("max_len")
+    return (raw[:max_len] if max_len else raw), None
+
+
+async def _ask_current(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    q = _current_q(context)
+    prompt = q.get("prompt") or q.get("label") or q["id"]
+    if q.get("type") == "choice":
+        choices = q.get("choices") or []
+        rows = [[InlineKeyboardButton(c, callback_data=f"onba:{i}")]
+                for i, c in enumerate(choices)]
+        await context.bot.send_message(
+            chat_id, prompt, reply_markup=InlineKeyboardMarkup(rows)
+        )
+    else:
+        await context.bot.send_message(chat_id, prompt)
+
+
+async def _start_setup(context: ContextTypes.DEFAULT_TYPE,
+                        user_id: int, chat_id: int) -> int:
+    user = load_user(user_id)
+    pid = active_profile_id(user)
+    meta = friend_profile(pid)
+    questions = meta.onboarding or []
+    if not questions:
+        await context.bot.send_message(
+            chat_id,
+            f"{meta.label} braucht kein Setup — schreib einfach los."
+        )
+        return ConversationHandler.END
+    context.user_data["onb_user_id"] = user_id
+    context.user_data["onb_pid"] = pid
+    context.user_data["onb_questions"] = questions
+    context.user_data["onb_answers"] = {}
+    context.user_data["onb_idx"] = 0
+    await context.bot.send_message(
+        chat_id, f"Einrichtung für {meta.label}. (Abbruch jederzeit mit /cancel)"
+    )
+    await _ask_current(context, chat_id)
+    return ONB_ASK
+
+
+async def _store_and_advance(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                              qid: str, val) -> int:
+    context.user_data["onb_answers"][qid] = val
+    context.user_data["onb_idx"] += 1
+    if context.user_data["onb_idx"] >= len(context.user_data["onb_questions"]):
+        return await _finalize(context, chat_id)
+    await _ask_current(context, chat_id)
+    return ONB_ASK
+
+
+async def _finalize(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> int:
+    user_id = context.user_data["onb_user_id"]
+    pid = context.user_data["onb_pid"]
+    answers = dict(context.user_data["onb_answers"])
+    questions = context.user_data["onb_questions"]
+
+    user = load_user(user_id)
+    st = profile_state(user, pid)
+    st["answers"] = answers
+    st["history"] = []      # persona details changed → fresh conversation
+    st["last_reply"] = None
+    st["message_ids"] = []
+    save_user(user_id, user)
+    await cancel_pending_friend(user_id)
+
+    meta = friend_profile(pid)
+    labels = {q["id"]: (q.get("label") or q["id"]) for q in questions}
+    lines = [f"Alles klar — {meta.label} ist eingerichtet:"]
+    for k, v in answers.items():
+        lines.append(f"• {labels.get(k, k)}: {v if v not in (None, '') else '(keine)'}")
+    lines.append("\nSchreib was, dann fängt das Gespräch an.")
+    await context.bot.send_message(chat_id, "\n".join(lines))
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# ---- entry points -------------------------------------------------
+
+async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if is_group_chat(update):
         await update.message.reply_text(
             "Der Freund ist nur im Privatchat verfügbar. In der Gruppe bin ich "
@@ -52,187 +135,55 @@ async def onb_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_allowed(update):
         await update.message.reply_text("Nicht autorisiert.")
         return ConversationHandler.END
-
-    user_id = update.effective_user.id
-    is_new = _is_new_command(update.message.text or "")
-    context.user_data["onb_clear_teacher"] = is_new
-
-    user = load_user(user_id)
-    has_friend = bool(user.get("friend_profile"))
-    has_teacher = bool(user.get("teacher"))
-
-    # Nothing to lose yet — skip the confirmation prompt.
-    if not (has_friend or (is_new and has_teacher)):
-        return await _begin_onboarding(update, context)
-
-    if is_new:
-        warn = (
-            "Das setzt deinen aktuellen Freund UND die Lehrer-Session zurück. "
-            "Der bisherige Gesprächsverlauf geht verloren."
-        )
-    else:
-        warn = (
-            "Das setzt deinen aktuellen Freund zurück. "
-            "Der bisherige Gesprächsverlauf geht verloren."
-        )
-    await update.message.reply_text(
-        warn + "\n\nWirklich neu starten?",
-        reply_markup=CONFIRM_KB,
-    )
-    return ONB_CONFIRM
+    return await _start_setup(context, update.effective_user.id, update.effective_chat.id)
 
 
-async def onb_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def setup_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     q = update.callback_query
     await q.answer()
-    if q.data == "onbc:no":
-        await q.edit_message_text("Abgebrochen. Alles bleibt wie es war.")
-        context.user_data.clear()
+    if is_group_chat(update) or not is_allowed(update):
         return ConversationHandler.END
-    if q.data != "onbc:yes":
-        return ONB_CONFIRM
-    await q.edit_message_text("Alles klar, neu aufsetzen.")
-    return await _begin_onboarding(update, context)
+    return await _start_setup(context, q.from_user.id, q.message.chat_id)
 
 
-async def _begin_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    user = load_user(user_id)
-    context.user_data["onb_prev_profile"] = user.get("friend_profile")
-    context.user_data["onb"] = {}
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=(
-            "Lass uns deinen deutschen Freund einrichten.\n"
-            "Wie soll er/sie heißen? (Abbruch mit /cancel)"
-        ),
-    )
-    return ONB_NAME
+# ---- in-flight answer handlers ------------------------------------
+
+async def onb_answer_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = _current_q(context)
+    if q.get("type") == "choice":
+        await update.message.reply_text("Bitte tippe auf eine der Optionen oben.")
+        return ONB_ASK
+    val, err = _validate(q, update.message.text or "")
+    if err:
+        await update.message.reply_text(err)
+        return ONB_ASK
+    return await _store_and_advance(context, update.effective_chat.id, q["id"], val)
 
 
-async def onb_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    name = (update.message.text or "").strip()[:40]
-    if not name:
-        await update.message.reply_text("Bitte einen Namen eingeben:")
-        return ONB_NAME
-    context.user_data["onb"]["name"] = name
-    await update.message.reply_text("Wie alt soll er/sie sein? (Zahl)")
-    return ONB_AGE
-
-
-async def onb_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def onb_answer_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    cq = update.callback_query
+    await cq.answer()
+    q = _current_q(context)
+    if q.get("type") != "choice":
+        return ONB_ASK
     try:
-        age = int((update.message.text or "").strip())
-        if not 6 <= age <= 120:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("Bitte eine Zahl zwischen 6 und 120 eingeben:")
-        return ONB_AGE
-    context.user_data["onb"]["age"] = age
-    await update.message.reply_text("Geschlecht?", reply_markup=GENDER_KB)
-    return ONB_GENDER
-
-
-async def onb_gender_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    q = update.callback_query
-    await q.answer()
-    if not q.data.startswith("g:"):
-        return ONB_GENDER
-    gender = q.data.split(":", 1)[1]
-    context.user_data["onb"]["gender"] = gender
-    await q.edit_message_text(f"Geschlecht: {gender}")
-    await context.bot.send_message(
-        chat_id=q.message.chat_id,
-        text="Wo wohnt er/sie? (Stadt oder Region in DE/AT/CH)",
-    )
-    return ONB_CITY
-
-
-async def onb_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    city = (update.message.text or "").strip()[:60]
-    if not city:
-        await update.message.reply_text("Bitte eine Stadt eingeben:")
-        return ONB_CITY
-    context.user_data["onb"]["city"] = city
-    await update.message.reply_text(
-        "Noch was Besonderes? Beruf, Hobbys, Eigenheiten? (oder /skip)"
-    )
-    return ONB_EXTRAS
-
-
-async def onb_extras(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["onb"]["extras"] = (update.message.text or "").strip()[:500]
-    return await _ask_level(update, context)
+        i = int(cq.data.split(":", 1)[1])
+        choice = (q.get("choices") or [])[i]
+    except (ValueError, IndexError):
+        return ONB_ASK
+    await cq.edit_message_text(f"{q.get('label') or q['id']}: {choice}")
+    return await _store_and_advance(context, cq.message.chat_id, q["id"], choice)
 
 
 async def onb_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["onb"]["extras"] = ""
-    return await _ask_level(update, context)
-
-
-async def _ask_level(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "Und zum Schluss: welches Deutsch-Niveau hast DU gerade?\n"
-        "Das hilft mir, Korrekturen und Wortschatz passend zu wählen.\n"
-        "(A1 = Anfänger · B1 = solide Mittelstufe · C2 = fast wie Muttersprachler)",
-        reply_markup=LEVEL_KB,
-    )
-    return ONB_LEVEL
-
-
-async def onb_level_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    q = update.callback_query
-    await q.answer()
-    if not q.data or not q.data.startswith("lv:"):
-        return ONB_LEVEL
-    level = q.data.split(":", 1)[1]
-    if level not in VALID_LEVELS:
-        return ONB_LEVEL
-    context.user_data["onb"]["level"] = level
-    await q.edit_message_text(f"Niveau: {level}")
-    return await _finalize_onboarding(update, context)
-
-
-async def _finalize_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    onb = dict(context.user_data["onb"])
-    level = onb.pop("level", FRIEND_DEFAULT_LEVEL)
-    profile = onb
-
-    user = load_user(user_id)
-    user["friend_profile"] = profile
-    user["user_level"] = level
-    user["friend_history"] = []  # fresh start with new persona
-    user["last_friend_reply"] = None
-    if context.user_data.get("onb_clear_teacher"):
-        user["teacher"] = None
-    save_user(user_id, user)
-
-    await cancel_pending_friend(user_id)
-
-    msg = (
-        f"Alles klar — dein neuer Freund:\n"
-        f"• Name: {profile['name']}\n"
-        f"• Alter: {profile['age']}\n"
-        f"• Geschlecht: {profile['gender']}\n"
-        f"• Stadt: {profile['city']}\n"
-        f"• Besonderheiten: {profile.get('extras') or '(keine)'}\n"
-        f"• Dein Niveau: {level}"
-    )
-    if context.user_data.get("onb_clear_teacher"):
-        msg += "\n\nLehrer-Session auch zurückgesetzt."
-    msg += "\n\nSchreib was, dann fängt das Gespräch an."
-    await update.message.reply_text(msg)
-    context.user_data.clear()
-    return ConversationHandler.END
+    q = _current_q(context)
+    if not q.get("optional"):
+        await update.message.reply_text("Diese Frage kann nicht übersprungen werden.")
+        return ONB_ASK
+    return await _store_and_advance(context, update.effective_chat.id, q["id"], "")
 
 
 async def onb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    prev = context.user_data.get("onb_prev_profile")
-    if prev is not None:
-        user = load_user(update.effective_user.id)
-        user["friend_profile"] = prev
-        save_user(update.effective_user.id, user)
     await update.message.reply_text("Abgebrochen. Profil bleibt wie es war.")
     context.user_data.clear()
     return ConversationHandler.END
@@ -241,20 +192,15 @@ async def onb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 def build_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
-            CommandHandler("new_friend", onb_start),
-            CommandHandler("new", onb_start),
+            CommandHandler("setup", setup_start),
+            CallbackQueryHandler(setup_start_cb, pattern=r"^onbsetup$"),
         ],
         states={
-            ONB_CONFIRM: [CallbackQueryHandler(onb_confirm_cb, pattern=r"^onbc:")],
-            ONB_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, onb_name)],
-            ONB_AGE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, onb_age)],
-            ONB_GENDER: [CallbackQueryHandler(onb_gender_cb, pattern=r"^g:")],
-            ONB_CITY:   [MessageHandler(filters.TEXT & ~filters.COMMAND, onb_city)],
-            ONB_EXTRAS: [
+            ONB_ASK: [
                 CommandHandler("skip", onb_skip),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onb_extras),
+                CallbackQueryHandler(onb_answer_choice, pattern=r"^onba:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onb_answer_text),
             ],
-            ONB_LEVEL:  [CallbackQueryHandler(onb_level_cb, pattern=r"^lv:")],
         },
         fallbacks=[CommandHandler("cancel", onb_cancel)],
     )

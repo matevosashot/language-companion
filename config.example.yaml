@@ -9,7 +9,8 @@ claude:
     allowed_tools: [Read, WebSearch, Skill] # overide allowed tools for friend model
     model: claude-sonnet-4-6
     default_language_level: B2
-    workdir: german/friend
+    workdir: german/friend          # BASE dir; each subfolder with CLAUDE.md + profile.yaml is a selectable profile
+    default_profile: alltag         # profile id used as the default / for migrating old sessions
   teacher:
     allowed_tools: [Read, WebSearch, Skill]
     model: claude-sonnet-4-6

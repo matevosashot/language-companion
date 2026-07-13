@@ -1,0 +1,37 @@
+# Alltags-Freund — der ursprüngliche, frei konfigurierbare deutsche Kumpel.
+# Die Fragen unten reproduzieren das alte /new-Onboarding (Name/Alter/…),
+# damit migrierte Sessions weiterhin passen (gleiche Antwort-IDs).
+label: "🇩🇪 Alltags-Freund"
+description: "Lockerer deutscher Kumpel zum Quatschen im Alltag"
+# model / default_language_level werden aus claude.friend in config.yaml geerbt,
+# wenn hier nicht gesetzt.
+
+onboarding:
+  - id: name
+    label: "Name"
+    prompt: "Wie soll dein Freund heißen?"
+    type: text
+    max_len: 40
+  - id: age
+    label: "Alter"
+    prompt: "Wie alt soll er/sie sein? (Zahl)"
+    type: text
+    validate: int_range
+    min: 6
+    max: 120
+  - id: gender
+    label: "Geschlecht"
+    prompt: "Geschlecht?"
+    type: choice
+    choices: ["männlich", "weiblich", "divers"]
+  - id: city
+    label: "Stadt"
+    prompt: "Wo wohnt er/sie? (Stadt oder Region in DE/AT/CH)"
+    type: text
+    max_len: 60
+  - id: extras
+    label: "Besonderheiten"
+    prompt: "Noch was Besonderes? Beruf, Hobbys, Eigenheiten? (oder /skip)"
+    type: text
+    optional: true
+    max_len: 500

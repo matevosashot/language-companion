@@ -13,10 +13,10 @@ A Telegram bot that pairs two **Claude Code** sessions as language-learning side
 
 You send a message → two things happen in parallel:
 
-1. **Freund** replies in character. The persona has a profile (name, age, city, …) you set via `/new`, and a CEFR level (A1–C2) that gates vocabulary and sentence complexity.
+1. **Freund** replies in character. You pick *which* friend with `/profile` (e.g. an everyday German buddy, or a quant-finance interview partner) — each is a separate persona with its own `CLAUDE.md` and its own Claude session. Profiles that support it carry per-profile details you fill in with `/setup` (the everyday friend asks name, age, city, …), plus a CEFR level (A1–C2) that gates vocabulary and sentence complexity.
 2. **Lehrer** silently inspects the same message. If it's grammatically correct, you get a 👍 reaction. If not, you get an inline reply with the correction and explanation.
 
-Both personas remember the conversation across restarts via Claude Code's `--resume <session_id>`. The Freund's history is checkpointed turn-by-turn so you can `/rewind` arbitrary numbers of turns.
+Both personas remember the conversation across restarts via Claude Code's `--resume <session_id>`. Each friend profile keeps its **own** session, so switching from one friend to another and back resumes the earlier conversation untouched. The active profile's history is checkpointed turn-by-turn so you can `/rewind` arbitrary numbers of turns.
 
 Voice notes are transcribed locally with `mlx-whisper` (Apple Silicon optional) and then go through the same pipeline.
 
@@ -44,12 +44,12 @@ handlers.handle_message  ──►  handlers.dispatch_user_text
 - **`src/friend.py`** — Freund prompt building, per-user cancellation state, `friend_turn`
 - **`src/teacher.py`** — Lehrer prompt building, `teacher_turn`
 - **`src/markdown.py`** — markdown → Telegram-flavored HTML
-- **`src/handlers.py`** — Telegram callbacks (`/rewind`, `/reload`, `/status`, `/new_teacher`, message dispatch)
-- **`src/onboarding.py`** — `ConversationHandler` for `/new` and `/new_friend`
+- **`src/handlers.py`** — Telegram callbacks (`/profile`, `/reset`, `/rewind`, `/reload`, `/status`, `/reset_teacher`, message dispatch)
+- **`src/onboarding.py`** — generic, data-driven `ConversationHandler` for `/setup` (reads the active profile's `profile.yaml` questions)
 - **`src/voice.py`** — optional mlx-whisper transcription path
 - **`src/idle.py`** — background loop that re-engages silent users
 - **`src/app.py`** — wires everything together
-- **`german/friend/CLAUDE.md`** and **`german/teacher/CLAUDE.md`** — persona system prompts (these are the actual "intelligence" of the bot — see "Adapting" below). The top-level `german/` folder is the language pack; swap in a `french/`, `spanish/`, … sibling to host a different language and point `claude.friend.workdir` / `claude.teacher.workdir` at it.
+- **`german/friend/<profile>/CLAUDE.md` + `profile.yaml`** and **`german/teacher/CLAUDE.md`** — persona system prompts (these are the actual "intelligence" of the bot — see "Friend profiles" and "Adapting" below). The top-level `german/` folder is the language pack; swap in a `french/`, `spanish/`, … sibling to host a different language and point `claude.friend.workdir` / `claude.teacher.workdir` at it.
 
 ### Session storage
 
@@ -61,7 +61,58 @@ One JSON file per Telegram user under the `sessions.dir` configured in `config.y
 └── 87654321.json
 ```
 
-Each file holds that user's `friend_history` (list of Claude session IDs + excerpts for `/rewind`), `teacher` (current teacher session ID), `friend_profile`, `user_level`, and last-seen timestamps. Concurrent writes from different users no longer share a file, and pruning a user is `rm sessions/<uid>.json`.
+Each file holds that user's `active_friend_profile`, a `friend_profiles` map (per profile: its `history` of Claude session IDs + excerpts for `/rewind`, the onboarding `answers`, `last_reply`, and recent `message_ids`), a single shared `teacher` session ID, the global `user_level`, and last-seen timestamps. Old single-friend session files are migrated into this shape automatically the first time they're loaded (the existing Claude session is preserved, so the conversation resumes seamlessly). Concurrent writes from different users no longer share a file, and pruning a user is `rm sessions/<uid>.json`.
+
+## Friend profiles
+
+The friend is no longer a single persona — it's a set of **profiles**, each its own
+subfolder under `claude.friend.workdir` (the *base* dir, `german/friend/`):
+
+```
+german/friend/
+├── alltag/            # everyday German buddy (the default)
+│   ├── CLAUDE.md      # the persona's system prompt
+│   └── profile.yaml   # label + onboarding questions
+└── quant/             # quant-finance interview partner (in German)
+    ├── CLAUDE.md
+    └── profile.yaml
+```
+
+A subfolder becomes a selectable profile as soon as it contains **both** a
+`CLAUDE.md` and a `profile.yaml`. Profiles are discovered at startup; the configured
+`claude.friend.default_profile` is the default (and the target old sessions migrate
+into). Each profile keeps its **own** Claude session, so `/profile` switching never
+crosses conversations. The single Lehrer and your `user_level` are shared across all
+friend profiles — switching friends never disturbs grading.
+
+`profile.yaml` describes the persona and its onboarding:
+
+```yaml
+label: "🇩🇪 Alltags-Freund"          # shown on the /profile button
+description: "Lockerer deutscher Kumpel"
+model: claude-sonnet-4-6             # optional; inherits claude.friend.model
+default_language_level: B2           # optional fallback (user_level still wins)
+onboarding:                          # may be empty → no /setup needed
+  - id: name
+    label: "Name"                    # used in the injected [PROFIL] block
+    prompt: "Wie soll dein Freund heißen?"
+    type: text                       # free text
+    max_len: 40
+  - id: age
+    prompt: "Wie alt?"
+    type: text
+    validate: int_range              # with min/max
+    min: 6
+    max: 120
+  - id: gender
+    prompt: "Geschlecht?"
+    type: choice                     # allowed answers → inline buttons
+    choices: ["männlich", "weiblich", "divers"]
+```
+
+`/setup` walks these questions for the active profile; the answers are rendered into
+the friend's first-message `[PROFIL]` block. To add a new friend, drop in a new
+subfolder with these two files — no code changes.
 
 ## Setup
 
@@ -97,17 +148,18 @@ python german-teacher-bot.py
 
 | Command | Action |
 |---|---|
-| `/new` | Onboard a fresh Freund + reset Lehrer session |
-| `/new_friend` | Same, but keep the Lehrer session |
-| `/new_teacher` | Reset only the Lehrer |
+| `/profile` | Pick / switch the friend persona (inline buttons; ✓ marks the active one). Each profile has its own Claude session. |
+| `/setup` | Configure the active profile's details (data-driven from its `profile.yaml`). Re-runnable; resets that profile's conversation. |
+| `/reset` | Reset the active friend's session (with confirmation). Keeps the profile's configured details. |
+| `/reset_teacher` | Reset the Lehrer session (works in private and in groups) |
 | `/level <A1–C2>` | Set the CEFR level the Lehrer grades against (resets the Lehrer session). Works in private and per-member in groups. |
 | `/reload` | Re-read both `CLAUDE.md` files inside active sessions |
 | `/reload_friend`, `/reload_teacher` | Reload just one |
-| `/rewind [N]` | Forget the last N Freund turns (default 1) |
+| `/rewind [N]` | Forget the last N Freund turns of the active profile (default 1) |
 | `/rewind list` | Interactive list with buttons |
-| `/status` | Show profile, level, history depth, voice state |
+| `/status` | Show active profile, available profiles, level, history depth, voice state |
 | `/ping` | Sanity check |
-| `/cancel` | Abort onboarding |
+| `/cancel` | Abort `/setup` |
 
 ## Group chats (teacher-only mode)
 
@@ -147,16 +199,16 @@ nothing. Add the group's chat ID to `bot.allowed_chats` in `config.yaml`.
 
 The Python in `src/` is plumbing. The bot's personality lives in two places:
 
-1. **`<language>/friend/CLAUDE.md`** (e.g. `german/friend/CLAUDE.md`) — what the friend persona believes about itself and how it should talk.
+1. **`<language>/friend/<profile>/CLAUDE.md` + `profile.yaml`** (e.g. `german/friend/alltag/`) — what each friend persona believes about itself, how it talks, and which details `/setup` asks for. Add or rewrite a profile by dropping in a subfolder (see "Friend profiles").
 2. **`<language>/teacher/CLAUDE.md`** (e.g. `german/teacher/CLAUDE.md`) — what counts as an error, how to format corrections, when to output the `OK` marker.
 
 To turn this into, say, a French tutor or a coding buddy:
 
-- Rewrite both `CLAUDE.md` files for the new domain.
-- Update `PROFILE_PREFIX` and `DEFAULT_PROFILE` in [src/friend.py](src/friend.py) — currently German-specific (CEFR levels, German instructions to the model).
+- Add/rewrite friend profiles under `claude.friend.workdir` (each = a `CLAUDE.md` + `profile.yaml`) and rewrite the teacher `CLAUDE.md`.
+- The friend's first-message framing (the `[PROFIL]` block + CEFR guidance) is built generically in `build_friend_first_message` in [src/friend.py](src/friend.py) from the profile's questions — usually no code change needed; the German wording lives there if you want to localize it.
 - Update `build_teacher_prompt` in [src/teacher.py](src/teacher.py) if your "teacher" needs a different framing.
 - Change `teacher.ok_marker` / `teacher.ok_reaction` in `config.yaml` if the silent-when-correct contract should differ.
-- Replace the German onboarding strings and the CEFR level keyboard in [src/onboarding.py](src/onboarding.py).
+- The onboarding flow ([src/onboarding.py](src/onboarding.py)) is data-driven — change the questions in each `profile.yaml`, not the code. The learner's CEFR level is set separately via `/level <A1–C2>` ([src/handlers.py](src/handlers.py)) and applies across all profiles.
 - Adjust `proactivity.idle_prompt` in `config.yaml` for the re-engagement nudge tone.
 
 If you don't want two personas, delete the teacher path: drop `teacher_turn` from `dispatch_user_text` in [src/handlers.py](src/handlers.py) and stop registering anything from [src/teacher.py](src/teacher.py).

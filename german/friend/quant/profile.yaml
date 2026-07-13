@@ -1,0 +1,18 @@
+# Quant-Finance-Interview-Freund — übt Quant-Interviewfragen, aber auf DEUTSCH,
+# damit der Lehrer weiter ganz normal das Deutsch des Nutzers korrigiert.
+label: "📈 Quant-Interview"
+description: "Übt Quant-Finance-Interviewfragen auf Deutsch"
+default_language_level: C1
+
+onboarding:
+  - id: focus
+    label: "Schwerpunkt"
+    prompt: "Worauf willst du dich konzentrieren?"
+    type: choice
+    choices: ["Brainteaser", "Wahrscheinlichkeit", "Stochastik", "Gemischt"]
+  - id: target_role
+    label: "Zielrolle/Firma"
+    prompt: "Zielrolle oder Firma? (z.B. „Quant Researcher bei einem HFT“ — oder /skip)"
+    type: text
+    optional: true
+    max_len: 120

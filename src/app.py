@@ -18,9 +18,10 @@ from telegram.ext import (
 )
 
 BOT_COMMANDS = [
-    BotCommand("new", "Freund-Session neu starten (auch Lehrer zurücksetzen)"),
-    BotCommand("new_friend", "Nur Freund-Session neu starten"),
-    BotCommand("new_teacher", "Lehrer-Session zurücksetzen"),
+    BotCommand("profile", "Gesprächspartner (Freund) wählen/wechseln"),
+    BotCommand("setup", "Aktuellen Freund einrichten"),
+    BotCommand("reset", "Aktuellen Freund zurücksetzen"),
+    BotCommand("reset_teacher", "Lehrer-Session zurücksetzen"),
     BotCommand("teacher", "Frage an den Lehrer stellen"),
     BotCommand("level", "Dein Deutsch-Niveau setzen (A1–C2)"),
     BotCommand("rewind", "Letzte Freund-Nachrichten zurückspulen"),
@@ -31,10 +32,10 @@ BOT_COMMANDS = [
     BotCommand("ping", "Erreichbarkeit prüfen"),
 ]
 
-# Groups run teacher-only — friend/rewind/onboarding commands are hidden there.
+# Groups run teacher-only — friend/rewind/profile commands are hidden there.
 GROUP_BOT_COMMANDS = [
     BotCommand("teacher", "Frage an den Lehrer stellen"),
-    BotCommand("new_teacher", "Lehrer-Session zurücksetzen"),
+    BotCommand("reset_teacher", "Lehrer-Session zurücksetzen"),
     BotCommand("level", "Dein Deutsch-Niveau setzen (A1–C2)"),
     BotCommand("status", "Aktuellen Sitzungsstatus anzeigen"),
     BotCommand("ping", "Erreichbarkeit prüfen"),
@@ -44,8 +45,9 @@ from .config import (
     ALLOWED_USERS,
     BOT_TOKEN,
     CFG,
-    FRIEND_MODEL,
-    FRIEND_WORKDIR,
+    DEFAULT_FRIEND_PROFILE,
+    FRIEND_BASE_WORKDIR,
+    FRIEND_PROFILES,
     TEACHER_MODEL,
     TEACHER_WORKDIR,
     VOICE_ENABLED,
@@ -53,11 +55,15 @@ from .config import (
 from .handlers import (
     handle_message,
     level_cmd,
-    new_teacher_cmd,
     ping_cmd,
+    profile_callback,
+    profile_cmd,
     reload_cmd,
     reload_friend_cmd,
     reload_teacher_cmd,
+    reset_callback,
+    reset_cmd,
+    reset_teacher_cmd,
     rewind_callback,
     rewind_cmd,
     status_cmd,
@@ -75,15 +81,31 @@ def main():
         raise SystemExit(
             f"Set {CFG['bot']['token_env']} (or TELEGRAM_BOT_TOKEN) in .env"
         )
-    for wd in (FRIEND_WORKDIR, TEACHER_WORKDIR):
-        if not (Path(wd) / "CLAUDE.md").exists():
-            raise SystemExit(f"Missing {Path(wd) / 'CLAUDE.md'}")
+    if not FRIEND_PROFILES:
+        raise SystemExit(
+            f"No friend profiles found under {FRIEND_BASE_WORKDIR} — each profile "
+            "needs a subfolder with both CLAUDE.md and profile.yaml."
+        )
+    if DEFAULT_FRIEND_PROFILE not in FRIEND_PROFILES:
+        raise SystemExit(
+            f"default_profile '{DEFAULT_FRIEND_PROFILE}' not found; "
+            f"available: {list(FRIEND_PROFILES)}"
+        )
+    for pid, meta in FRIEND_PROFILES.items():
+        if not (Path(meta.workdir) / "CLAUDE.md").exists():
+            raise SystemExit(f"Missing CLAUDE.md for friend profile '{pid}'")
+    if not (Path(TEACHER_WORKDIR) / "CLAUDE.md").exists():
+        raise SystemExit(f"Missing {Path(TEACHER_WORKDIR) / 'CLAUDE.md'}")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(build_onboarding_handler())
+    app.add_handler(CommandHandler("profile", profile_cmd))
+    app.add_handler(CallbackQueryHandler(profile_callback, pattern=r"^prof:"))
+    app.add_handler(CommandHandler("reset", reset_cmd))
+    app.add_handler(CallbackQueryHandler(reset_callback, pattern=r"^rstf:"))
     app.add_handler(CommandHandler("teacher", teacher_cmd))
-    app.add_handler(CommandHandler("new_teacher", new_teacher_cmd))
+    app.add_handler(CommandHandler("reset_teacher", reset_teacher_cmd))
     app.add_handler(CommandHandler("level", level_cmd))
     app.add_handler(CommandHandler("reload_friend", reload_friend_cmd))
     app.add_handler(CommandHandler("reload_teacher", reload_teacher_cmd))
@@ -112,9 +134,12 @@ def main():
     app.add_error_handler(err_handler)
 
     print("German Language Companion starting…")
-    print("  Freund-Workdir:", FRIEND_WORKDIR)
+    print("  Friend base   :", FRIEND_BASE_WORKDIR)
+    print("  Friend profiles:", ", ".join(
+        f"{pid}{' (default)' if pid == DEFAULT_FRIEND_PROFILE else ''}"
+        for pid in FRIEND_PROFILES
+    ) or "(none)")
     print("  Lehrer-Workdir:", TEACHER_WORKDIR)
-    print("  Freund-Model  :", FRIEND_MODEL or "(default)")
     print("  Lehrer-Model  :", TEACHER_MODEL or "(default)")
     print("  Allowed users :", ALLOWED_USERS or "everyone")
     print("  Voice         :", "on" if VOICE_ENABLED else "off")
