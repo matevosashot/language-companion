@@ -26,7 +26,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_group_chat(update):
         if is_allowed_chat(update):
             await update.message.reply_text(
-                "✅ Dieser Gruppenchat ist freigeschaltet. Schreibt einfach los."
+                "✅ Dieser Gruppenchat ist freigeschaltet. Schreibt einfach los "
+                "— /help erklärt, wie's funktioniert."
             )
             return
         await update.message.reply_text(
@@ -40,7 +41,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_allowed(update):
         await update.message.reply_text(
-            "✅ Du bist freigeschaltet. Schreib einfach los, dann geht's los."
+            "✅ Du bist freigeschaltet. Schreib einfach los, dann geht's los.\n\n"
+            "ℹ️ /help erklärt, wie der Bot funktioniert und was du einstellen kannst."
         )
         return
 
@@ -51,8 +53,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "So geht's:\n"
         "1. Kopiere die Chat-ID oben.\n"
         "2. Schick sie dem Admin.\n"
-        "3. Sobald du freigeschaltet bist, schreib mir einfach — dann "
-        "kann's losgehen.",
+        "3. Sobald du freigeschaltet bist, schreib mir einfach — "
+        "/help zeigt dir dann alles.",
         parse_mode="Markdown",
     )
 

@@ -30,6 +30,7 @@ from .friend_cmds import (
     rewind_callback,
     rewind_cmd,
 )
+from .help import help_cmd
 from .reload import (
     reload_cmd,
     reload_friend_cmd,
@@ -46,6 +47,7 @@ __all__ = [
     "handle_group_text",
     "handle_message",
     "handle_user_text",
+    "help_cmd",
     "is_admin",
     "is_allowed",
     "is_allowed_chat",

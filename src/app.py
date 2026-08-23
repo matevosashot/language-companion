@@ -19,6 +19,7 @@ from telegram.ext import (
 
 BOT_COMMANDS = [
     BotCommand("start", "Zugang / Chat-ID anzeigen"),
+    BotCommand("help", "Erklärt, wie der Bot funktioniert"),
     BotCommand("profile", "Gesprächspartner (Freund) wählen/wechseln"),
     BotCommand("setup", "Aktuellen Freund einrichten"),
     BotCommand("reset", "Aktuellen Freund zurücksetzen"),
@@ -36,6 +37,7 @@ BOT_COMMANDS = [
 # Groups run teacher-only — friend/rewind/profile commands are hidden there.
 GROUP_BOT_COMMANDS = [
     BotCommand("start", "Zugang / Chat-ID anzeigen"),
+    BotCommand("help", "Erklärt, wie der Bot funktioniert"),
     BotCommand("teacher", "Frage an den Lehrer stellen"),
     BotCommand("reset_teacher", "Lehrer-Session zurücksetzen"),
     BotCommand("level", "Dein Deutsch-Niveau setzen (A1–C2)"),
@@ -61,6 +63,7 @@ from .handlers import (
     admin_cmd,
     build_admin_handler,
     handle_message,
+    help_cmd,
     level_cmd,
     ping_cmd,
     profile_callback,
@@ -116,6 +119,7 @@ def main():
 
     app.add_handler(build_onboarding_handler())
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("admin_add", admin_add_cmd))
     app.add_handler(build_admin_handler())  # before admin_callback: claims adm:add
