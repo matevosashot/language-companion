@@ -2,6 +2,8 @@
 
 import logging
 import os
+import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,8 +34,9 @@ ALLOWLIST_FILE = SCRIPT_DIR / (
 )
 
 _CLAUDE = CFG["claude"]
-CLAUDE_PATH = _CLAUDE["path"]
 _DEFAULT_TOOLS = _CLAUDE.get("allowed_tools") or []
+# Ignored by the CLI unless auth is an API key — see the note in config.yaml.
+CONTEXT_1M = bool(_CLAUDE.get("context_1m"))
 
 
 def _persona(key: str) -> dict:
@@ -59,6 +62,9 @@ FRIEND_TOOLS = _tools(_FRIEND)
 TEACHER_TOOLS = _tools(_TEACHER)
 FRIEND_DEFAULT_LEVEL = _FRIEND["default_language_level"]
 TEACHER_DEFAULT_LEVEL = _TEACHER["default_language_level"]
+# 0 disables compaction for that persona.
+FRIEND_COMPACT_AT = int(_FRIEND.get("compact_at_tokens") or 0)
+TEACHER_COMPACT_AT = int(_TEACHER.get("compact_at_tokens") or 0)
 
 # ------------------------------------------------------------------
 # Friend profiles
@@ -137,11 +143,54 @@ TEACHER_GROUP_LEVEL = CFG["teacher"].get("group_level") or TEACHER_DEFAULT_LEVEL
 VOICE_CFG_ENABLED = bool(CFG["voice"]["enabled"])
 VOICE_MODEL = CFG["voice"]["model"]
 
-logging.basicConfig(
-    level=CFG["logging"]["level"],
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+# Photos: the friend sees photos the user sends and can send web photos back.
+PHOTOS_ENABLED = bool((CFG.get("photos") or {}).get("enabled", True))
+# Streaming: the friend's reply grows live in a Telegram draft (private chats).
+STREAMING_ENABLED = bool((CFG.get("streaming") or {}).get("enabled", True))
+
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
+logging.basicConfig(level=CFG["logging"]["level"], format=_LOG_FORMAT)
 logger = logging.getLogger("german_bot")
+
+# Keep the bot token out of the journal. Telegram puts it in every API URL
+# (https://api.telegram.org/bot<TOKEN>/...), and httpx logs each request at
+# INFO — that leaked the token every few seconds. Silencing httpx is the direct
+# fix; redacting the formatted output (tracebacks included, since httpx/PTB
+# errors embed the URL) catches whatever else might log it. Don't remove.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+_TOKEN_RE = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
+
+
+def redact(text: str) -> str:
+    if BOT_TOKEN:
+        text = text.replace(BOT_TOKEN, "<bot-token>")
+    return _TOKEN_RE.sub("<bot-token>", text)
+
+
+class RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return redact(super().format(record))
+
+    def formatException(self, ei) -> str:
+        return redact(super().formatException(ei))
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.setFormatter(RedactingFormatter(_LOG_FORMAT))
+# Warnings and uncaught tracebacks would otherwise hit stderr unredacted.
+logging.captureWarnings(True)
+
+
+def _log_uncaught(exc_type, exc, tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc, tb)
+        return
+    logger.critical("Uncaught exception", exc_info=(exc_type, exc, tb))
+
+
+sys.excepthook = _log_uncaught
 
 try:
     if VOICE_CFG_ENABLED:

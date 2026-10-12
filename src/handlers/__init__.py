@@ -20,6 +20,7 @@ from .common import (
 from .dispatch import (
     handle_group_text,
     handle_message,
+    handle_photo,
     handle_user_text,
 )
 from .friend_cmds import (
@@ -36,7 +37,7 @@ from .reload import (
     reload_friend_cmd,
     reload_teacher_cmd,
 )
-from .status import ping_cmd, status_cmd
+from .status import context_cmd, ping_cmd, status_cmd
 from .teacher_cmds import level_cmd, reset_teacher_cmd, teacher_cmd
 
 __all__ = [
@@ -44,8 +45,10 @@ __all__ = [
     "admin_callback",
     "admin_cmd",
     "build_admin_handler",
+    "context_cmd",
     "handle_group_text",
     "handle_message",
+    "handle_photo",
     "handle_user_text",
     "help_cmd",
     "is_admin",

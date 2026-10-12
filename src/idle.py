@@ -6,11 +6,54 @@ import logging
 
 from telegram.ext import Application
 
-from .config import IDLE_CHECK_INTERVAL, IDLE_PING_AFTER, IDLE_PROMPT
+from .claude_runner import compact_session, get_context
+from .config import (
+    FRIEND_COMPACT_AT,
+    IDLE_CHECK_INTERVAL,
+    IDLE_PING_AFTER,
+    IDLE_PROMPT,
+    friend_profile,
+)
 from .friend import PENDING_FRIEND, PendingFriend, friend_turn
-from .sessions import iter_user_ids, load_user, now_iso, save_user
+from .sessions import (
+    active_profile_id,
+    iter_user_ids,
+    load_user,
+    now_iso,
+    profile_state,
+    save_user,
+)
 
 logger = logging.getLogger(__name__)
+
+
+async def _compact_idle_friend(user: dict) -> None:
+    """Shrink the active profile's session before the re-engagement ping, so
+    the ping itself is composed on the smaller context. Best effort — the ping
+    must still go out if this fails."""
+    if FRIEND_COMPACT_AT <= 0:
+        return
+    pid = active_profile_id(user)
+    meta = friend_profile(pid)
+    history = profile_state(user, pid).get("history") or []
+    if not history:
+        return
+    sid = history[-1]["sid"]
+
+    usage = await get_context(meta.workdir, sid, meta.tools, meta.model)
+    if usage is None:
+        return
+    tokens = usage["totalTokens"]
+    if tokens < FRIEND_COMPACT_AT:
+        return
+
+    logger.info("Friend session %s (profile %s) at %d tokens (limit %d) — compacting",
+                sid, pid, tokens, FRIEND_COMPACT_AT)
+    result = await compact_session(meta.workdir, sid, meta.tools, meta.model)
+    if result.error:
+        logger.warning("Friend compaction failed: %s", result.error)
+    else:
+        logger.info("Friend session %s compacted (was %d tokens)", sid, tokens)
 
 
 async def idle_pinger(app: Application) -> None:
@@ -49,6 +92,11 @@ async def idle_pinger(app: Application) -> None:
 
                 if uid in PENDING_FRIEND:
                     continue
+
+                try:
+                    await _compact_idle_friend(user)
+                except Exception:
+                    logger.exception("Idle compaction failed for user %s", uid)
                 pending = PendingFriend(queued=[IDLE_PROMPT], excerpt="[idle-ping]")
                 PENDING_FRIEND[uid] = pending
                 pending.task = asyncio.create_task(friend_turn(app, uid, chat_id))

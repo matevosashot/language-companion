@@ -6,19 +6,30 @@ bot:
   # allowlist_file: .telegram-german-sessions/allowed_chats.json  # default path
 
 claude:
-  path: claude                       # CLI binary
   allowed_tools: [Read, WebSearch, Skill] # allowed tools for all models
+  # Ask for the 1M-token context window. NOTE: the CLI ignores this unless you
+  # authenticate with an API key — on a Claude subscription it logs
+  # "Custom betas are only available for API key users" and stays at 200k.
+  context_1m: false
   friend:
     allowed_tools: [Read, WebSearch, Skill] # overide allowed tools for friend model
     model: claude-sonnet-4-6
     default_language_level: B2
     workdir: german/friend          # BASE dir; each subfolder with CLAUDE.md + profile.yaml is a selectable profile
     default_profile: alltag         # profile id used as the default / for migrating old sessions
+    # Compact the friend session once it exceeds this many tokens (shared by
+    # all profiles; checked when the 24h idle ping fires). The window is
+    # 200000 today and the CLI already autocompacts at ~167000, so 400000
+    # never fires — lower it (e.g. 150000) to actually enable compaction.
+    compact_at_tokens: 400000
   teacher:
     allowed_tools: [Read, WebSearch, Skill]
     model: claude-sonnet-4-6
     default_language_level: B2
     workdir: german/teacher
+    # Compact the teacher session after a reply once it exceeds this many
+    # tokens. Same caveat as the friend limit above.
+    compact_at_tokens: 400000
 
 sessions:
   dir: .telegram-german-sessions/    # one JSON file per Telegram user lives here
@@ -40,6 +51,12 @@ teacher:
 voice:
   enabled: true                      # auto-disabled if mlx-whisper is not importable
   model: mlx-community/whisper-small-mlx
+
+photos:
+  enabled: true                      # friend sees your photos and can send photos from Wikimedia Commons / the web
+
+streaming:
+  enabled: true                      # friend replies appear live as they are written (Telegram message drafts)
 
 logging:
   level: INFO

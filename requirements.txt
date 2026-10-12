@@ -1,5 +1,8 @@
-python-telegram-bot>=20.0
+python-telegram-bot>=22.7  # sendMessageDraft (live streaming)
 mistune>=3.0
 pyyaml>=6.0
+# Pinned: the SDK bundles the Claude Code build the bot runs on, so an
+# unpinned upgrade would swap the agent runtime underneath it.
+claude-agent-sdk==0.2.144
 # Optional: Voice transcription (Apple Silicon only)
 # mlx-whisper

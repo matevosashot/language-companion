@@ -5,7 +5,7 @@ friend + teacher command set, plus an admin section for admins."""
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from ..config import VOICE_ENABLED
+from ..config import PHOTOS_ENABLED, VOICE_ENABLED
 from .common import is_admin, is_allowed, is_allowed_chat, is_group_chat
 
 _GROUP_HELP = (
@@ -19,12 +19,18 @@ _GROUP_HELP = (
     "/level <A1–C2> — dein Deutsch-Niveau setzen (gilt nur für dich)\n"
     "/reset_teacher — deine Lehrer-Session zurücksetzen\n"
     "/status — aktueller Status\n"
+    "/context — Kontext-Auslastung der Lehrer-Session\n"
     "/ping — Erreichbarkeit prüfen"
 )
 
 
 def _private_help(admin: bool) -> str:
     voice = "an" if VOICE_ENABLED else "aus"
+    photos = (
+        "📷 Fotos: mit Text → der Freund antwortet (der Lehrer prüft den Text); "
+        "ohne Text → kommt mit deiner nächsten Nachricht. Der Freund kann dir "
+        "auch Fotos schicken." if PHOTOS_ENABLED else "📷 Fotos: aus"
+    )
     text = (
         "🤖 So funktioniert dieser Bot\n\n"
         "Du hast zwei Begleiter gleichzeitig:\n"
@@ -46,7 +52,9 @@ def _private_help(admin: bool) -> str:
         "/reload — beide Personas neu laden\n\n"
         "Sonstiges:\n"
         "/status — aktueller Sitzungsstatus\n"
-        f"/ping — Erreichbarkeit  ·  🎤 Sprachnachrichten: {voice}\n\n"
+        "/context — Kontext-Auslastung von Freund + Lehrer\n"
+        f"/ping — Erreichbarkeit  ·  🎤 Sprachnachrichten: {voice}\n"
+        f"{photos}\n\n"
         "⚙️ Konfiguration (für den Betreiber):\n"
         "• Freund-Profile: german/friend/<profil>/ "
         "(je CLAUDE.md + profile.yaml)\n"

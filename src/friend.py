@@ -10,14 +10,23 @@ import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from telegram.ext import Application
 
 from .claude_runner import run_claude
-from .config import FRIEND_DEFAULT_LEVEL, FRIEND_HISTORY_MAX, friend_profile
+from .config import (
+    FRIEND_DEFAULT_LEVEL,
+    FRIEND_HISTORY_MAX,
+    PHOTOS_ENABLED,
+    STREAMING_ENABLED,
+    friend_profile,
+)
 from .markdown import to_telegram_html
+from .photos import OutPhoto, build_photo_server, send_outbox
 from .sessions import active_profile_id, load_user, now_iso, profile_state, save_user
+from .streaming import DraftStreamer
 
 logger = logging.getLogger(__name__)
 
@@ -68,13 +77,20 @@ def build_friend_first_message(profile_meta, answers: dict | None,
     )
 
 
+def _photo_marker(n: int) -> str:
+    return "[Foto vom Nutzer]" if n == 1 else f"[{n} Fotos vom Nutzer]"
+
+
 @dataclass
 class PendingFriend:
     task: Optional[asyncio.Task] = None
-    proc_holder: dict = field(default_factory=dict)
     queued: list[str] = field(default_factory=list)
     excerpt: str = ""
     keeper_task: Optional[asyncio.Task] = None
+    # User photos riding along with the queued texts, and the Telegram album
+    # they came from (later uncaptioned album items join this turn).
+    images: list[Path] = field(default_factory=list)
+    media_group_id: Optional[str] = None
 
 
 PENDING_FRIEND: dict[int, PendingFriend] = {}
@@ -85,12 +101,6 @@ async def cancel_pending_friend(user_id: int) -> None:
     pending = PENDING_FRIEND.pop(user_id, None)
     if pending is None:
         return
-    proc = pending.proc_holder.get("proc")
-    if proc is not None:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
     if pending.task is not None and not pending.task.done():
         pending.task.cancel()
     if pending.keeper_task is not None and not pending.keeper_task.done():
@@ -101,6 +111,18 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
     pending = PENDING_FRIEND.get(user_id)
     if pending is None:
         return
+    streamer: Optional[DraftStreamer] = None
+
+    def stream_kw() -> dict:
+        """Fresh live-draft streamer for one run_claude attempt."""
+        nonlocal streamer
+        if streamer is not None:
+            streamer.abort()
+        if not STREAMING_ENABLED:
+            return {}
+        streamer = DraftStreamer(app.bot, chat_id)
+        return {"on_text": streamer.on_text, "on_tool": streamer.on_tool}
+
     try:
         user = load_user(user_id)
         pid = active_profile_id(user)
@@ -112,11 +134,21 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
         level = user.get("user_level") or meta.level or FRIEND_DEFAULT_LEVEL
 
         combined = "\n---\n".join(pending.queued)
+        if pending.images:
+            combined = f"{_photo_marker(len(pending.images))}\n{combined}"
         excerpt = pending.excerpt or (pending.queued[0][:60] if pending.queued else "")
 
         prompt = combined if cur_sid else build_friend_first_message(meta, answers, level, combined)
 
-        result = await run_claude(prompt, meta.workdir, cur_sid, meta.tools, pending.proc_holder, meta.model)
+        # Photos the friend picks land in `outbox` and go out after its text.
+        outbox: list[OutPhoto] = []
+        photo_kw = {"images": pending.images}
+        if PHOTOS_ENABLED:
+            server, names = build_photo_server(outbox)
+            photo_kw.update(mcp_servers={"fotos": server}, extra_tools=names)
+
+        result = await run_claude(prompt, meta.workdir, cur_sid, meta.tools,
+                                  model=meta.model, **photo_kw, **stream_kw())
 
         if result.cancelled:
             return
@@ -126,11 +158,21 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
             logger.info("Friend session %s (profile %s) expired, restarting fresh", cur_sid, pid)
             expired_restart = True
             prompt = build_friend_first_message(meta, answers, level, combined)
-            result = await run_claude(prompt, meta.workdir, None, meta.tools, pending.proc_holder, meta.model)
+            outbox.clear()
+            result = await run_claude(prompt, meta.workdir, None, meta.tools,
+                                      model=meta.model, **photo_kw, **stream_kw())
             if result.cancelled:
                 return
 
-        if result.error or not result.text:
+        # Text written before tool calls already went out as its own messages;
+        # don't repeat it if the turn's last text was one of those.
+        seg_ids = await streamer.finish() if streamer else []
+        seg_texts = streamer.sent_texts if streamer else []
+        final = (result.text or "").strip()
+        if seg_texts and final == seg_texts[-1]:
+            final = ""
+
+        if result.error or not (final or outbox or seg_ids):
             await app.bot.send_message(
                 chat_id=chat_id,
                 text=f"(Freund-Fehler: {result.error or 'leere Antwort'})",
@@ -152,20 +194,27 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
         user["chat_id"] = chat_id
         user["last_message_ts"] = now_iso()
         user["idle_ping_sent_at"] = None
-        st["last_reply"] = result.text
+        last_text = final or (seg_texts[-1] if seg_texts else "")
+        if last_text:
+            st["last_reply"] = last_text
         save_user(user_id, user)
 
-        reply_html = to_telegram_html(result.text)
-        if len(reply_html) > 4000:
-            reply_html = reply_html[:4000] + "\n\n… (gekürzt)"
-        sent = await app.bot.send_message(
-            chat_id=chat_id, text=reply_html, parse_mode="HTML",
-        )
+        sent_ids = list(seg_ids)
+        if final:
+            # Sending the real message also clears the live draft.
+            reply_html = to_telegram_html(final)
+            if len(reply_html) > 4000:
+                reply_html = reply_html[:4000] + "\n\n… (gekürzt)"
+            sent = await app.bot.send_message(
+                chat_id=chat_id, text=reply_html, parse_mode="HTML",
+            )
+            sent_ids.append(sent.message_id)
+        sent_ids += await send_outbox(app.bot, chat_id, outbox)
 
         user = load_user(user_id)
         st = profile_state(user, pid)
         ids = st.get("message_ids") or []
-        ids.append(sent.message_id)
+        ids.extend(sent_ids)
         st["message_ids"] = ids[-FRIEND_MSG_ID_MAX:]
         save_user(user_id, user)
 
@@ -174,6 +223,8 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
     except Exception:
         logger.exception("friend_turn crashed")
     finally:
+        if streamer is not None:
+            streamer.abort()  # no-op once finished
         cur = PENDING_FRIEND.get(user_id)
         if cur is pending:
             PENDING_FRIEND.pop(user_id, None)

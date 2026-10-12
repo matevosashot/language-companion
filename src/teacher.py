@@ -1,13 +1,15 @@
 """Teacher persona: stateless per-turn grammar / style corrector."""
 
+import asyncio
 import logging
 from typing import Optional
 
 from telegram import ReactionTypeEmoji
 from telegram.ext import Application
 
-from .claude_runner import run_claude
+from .claude_runner import ClaudeResult, compact_session, run_claude
 from .config import (
+    TEACHER_COMPACT_AT,
     TEACHER_DEFAULT_LEVEL,
     TEACHER_MODEL,
     TEACHER_OK_MARKER,
@@ -27,6 +29,51 @@ GROUP_KONTEXT_LABEL = "vorherige Nachricht im Chat"
 # the window and replies to them are rejected again.
 TEACHER_MSG_HISTORY_MAX = 30
 QUOTED_CORRECTION_MAX = 700
+
+# Teacher turns run as unlocked tasks (see handlers/dispatch.py), so two can
+# overlap for one user. Keyed like the teacher state itself: (state_chat_id, uid).
+_COMPACTING: set[tuple[Optional[int], int]] = set()
+_COMPACT_TASKS: set[asyncio.Task] = set()
+
+
+async def _compact_teacher(sid: str, tokens: int, user_id: int,
+                            state_chat_id: Optional[int]) -> None:
+    key = (state_chat_id, user_id)
+    if key in _COMPACTING:
+        return
+    _COMPACTING.add(key)
+    try:
+        logger.info("Teacher session %s at %d tokens (limit %d) — compacting",
+                    sid, tokens, TEACHER_COMPACT_AT)
+        result = await compact_session(TEACHER_WORKDIR, sid, TEACHER_TOOLS, TEACHER_MODEL)
+        if result.error:
+            logger.warning("Teacher compaction failed: %s", result.error)
+            return
+        # /compact keeps the session id today; persist a change anyway.
+        if result.session_id and result.session_id != sid:
+            user = load_user(user_id, state_chat_id)
+            user["teacher"] = result.session_id
+            save_user(user_id, user, state_chat_id)
+        logger.info("Teacher session %s compacted", sid)
+    except Exception:
+        logger.exception("Teacher compaction crashed")
+    finally:
+        _COMPACTING.discard(key)
+
+
+def _schedule_compaction(result: ClaudeResult, user_id: int,
+                          state_chat_id: Optional[int]) -> None:
+    """Shrink an oversized teacher session in the background. Detached on
+    purpose: the correction is already sent, and compaction must not keep the
+    'typing' indicator up or fail the turn."""
+    sid, tokens = result.session_id, result.context_tokens
+    if TEACHER_COMPACT_AT <= 0 or not sid or not tokens:
+        return
+    if tokens < TEACHER_COMPACT_AT:
+        return
+    task = asyncio.create_task(_compact_teacher(sid, tokens, user_id, state_chat_id))
+    _COMPACT_TASKS.add(task)  # keep a reference so it is not GC'd mid-flight
+    task.add_done_callback(_COMPACT_TASKS.discard)
 
 
 def build_teacher_prompt(context_text: Optional[str], user_message: str,
@@ -133,9 +180,10 @@ async def teacher_turn(app: Application, user_id: int, chat_id: int,
             )
         except Exception:
             logger.exception("Failed to set reaction")
-        return
+    else:
+        await _send_teacher_reply(app, user_id, chat_id, message_id, body, state_chat_id)
 
-    await _send_teacher_reply(app, user_id, chat_id, message_id, body, state_chat_id)
+    _schedule_compaction(result, user_id, state_chat_id)
 
 
 async def teacher_followup_turn(app: Application, user_id: int, chat_id: int,
@@ -164,3 +212,4 @@ async def teacher_followup_turn(app: Application, user_id: int, chat_id: int,
         save_user(user_id, user, state_chat_id)
 
     await _send_teacher_reply(app, user_id, chat_id, message_id, result.text.strip(), state_chat_id)
+    _schedule_compaction(result, user_id, state_chat_id)

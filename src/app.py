@@ -31,6 +31,7 @@ BOT_COMMANDS = [
     BotCommand("reload_friend", "CLAUDE.md des Freundes neu laden"),
     BotCommand("reload_teacher", "CLAUDE.md des Lehrers neu laden"),
     BotCommand("status", "Aktuellen Sitzungsstatus anzeigen"),
+    BotCommand("context", "Kontext-Auslastung der Sessions zeigen"),
     BotCommand("ping", "Erreichbarkeit prüfen"),
 ]
 
@@ -42,6 +43,7 @@ GROUP_BOT_COMMANDS = [
     BotCommand("reset_teacher", "Lehrer-Session zurücksetzen"),
     BotCommand("level", "Dein Deutsch-Niveau setzen (A1–C2)"),
     BotCommand("status", "Aktuellen Sitzungsstatus anzeigen"),
+    BotCommand("context", "Kontext-Auslastung der Sessions zeigen"),
     BotCommand("ping", "Erreichbarkeit prüfen"),
 ]
 
@@ -55,6 +57,8 @@ from .config import (
     FRIEND_PROFILES,
     TEACHER_MODEL,
     TEACHER_WORKDIR,
+    PHOTOS_ENABLED,
+    STREAMING_ENABLED,
     VOICE_ENABLED,
 )
 from .handlers import (
@@ -62,7 +66,9 @@ from .handlers import (
     admin_callback,
     admin_cmd,
     build_admin_handler,
+    context_cmd,
     handle_message,
+    handle_photo,
     help_cmd,
     level_cmd,
     ping_cmd,
@@ -137,8 +143,10 @@ def main():
     app.add_handler(CommandHandler("rewind", rewind_cmd))
     app.add_handler(CallbackQueryHandler(rewind_callback, pattern=r"^rw:"))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("context", context_cmd))
     app.add_handler(CommandHandler("ping", ping_cmd))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     async def on_startup(application: Application):
@@ -168,4 +176,6 @@ def main():
     print("  Admins        :", ADMIN_IDS or "(none!)")
     print("  Allowed chats :", len(allowlist.items()))
     print("  Voice         :", "on" if VOICE_ENABLED else "off")
+    print("  Photos        :", "on" if PHOTOS_ENABLED else "off")
+    print("  Streaming     :", "on" if STREAMING_ENABLED else "off")
     app.run_polling(drop_pending_updates=True)
