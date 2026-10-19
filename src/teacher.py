@@ -8,12 +8,15 @@ from telegram import ReactionTypeEmoji
 from telegram.ext import Application
 
 from .claude_runner import ClaudeResult, compact_session, run_claude
+from .correction import build_correction_server
 from .config import (
     TEACHER_COMPACT_AT,
     TEACHER_DEFAULT_LEVEL,
+    TEACHER_EFFORT,
     TEACHER_MODEL,
     TEACHER_OK_MARKER,
     TEACHER_OK_REACTION,
+    TEACHER_THINKING,
     TEACHER_TOOLS,
     TEACHER_WORKDIR,
 )
@@ -153,9 +156,17 @@ async def teacher_turn(app: Application, user_id: int, chat_id: int,
 
     prompt = build_teacher_prompt(context_text, text, level, kontext_label)
 
-    result = await run_claude(prompt, TEACHER_WORKDIR, sid, TEACHER_TOOLS, model=TEACHER_MODEL)
+    # The teacher writes the corrected text; this tool turns it into the
+    # marked-up first line deterministically (see correction.py).
+    marked: list[str] = []
+    server, names = build_correction_server(text, marked)
+    kw = dict(model=TEACHER_MODEL, thinking=TEACHER_THINKING, effort=TEACHER_EFFORT,
+              mcp_servers={"korrektur": server}, extra_tools=names)
+    result = await run_claude(prompt, TEACHER_WORKDIR, sid, TEACHER_TOOLS, **kw)
     if result.expired and sid:
-        result = await run_claude(prompt, TEACHER_WORKDIR, None, TEACHER_TOOLS, model=TEACHER_MODEL)
+        result = await run_claude(prompt, TEACHER_WORKDIR, None, TEACHER_TOOLS, **kw)
+    if marked:
+        logger.info("Teacher marked %d correction line(s)", len(marked))
 
     if result.cancelled:
         return
@@ -194,9 +205,11 @@ async def teacher_followup_turn(app: Application, user_id: int, chat_id: int,
     sid = user.get("teacher")
 
     prompt = build_followup_prompt(text, quoted_correction)
-    result = await run_claude(prompt, TEACHER_WORKDIR, sid, TEACHER_TOOLS, model=TEACHER_MODEL)
+    result = await run_claude(prompt, TEACHER_WORKDIR, sid, TEACHER_TOOLS, model=TEACHER_MODEL,
+                              thinking=TEACHER_THINKING, effort=TEACHER_EFFORT)
     if result.expired and sid:
-        result = await run_claude(prompt, TEACHER_WORKDIR, None, TEACHER_TOOLS, model=TEACHER_MODEL)
+        result = await run_claude(prompt, TEACHER_WORKDIR, None, TEACHER_TOOLS, model=TEACHER_MODEL,
+                              thinking=TEACHER_THINKING, effort=TEACHER_EFFORT)
 
     if result.cancelled:
         return

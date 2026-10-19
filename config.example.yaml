@@ -13,10 +13,16 @@ claude:
   context_1m: false
   friend:
     allowed_tools: [Read, WebSearch, Skill] # overide allowed tools for friend model
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5-5
     default_language_level: B2
     workdir: german/friend          # BASE dir; each subfolder with CLAUDE.md + profile.yaml is a selectable profile
     default_profile: alltag         # profile id used as the default / for migrating old sessions
+    # Thinking before replying. "adaptive" = the model decides each turn;
+    # "disabled" = never; a number caps thinking tokens (on Sonnet the
+    # model still decides whether to think). Effort: low / medium / high /
+    # xhigh / max. Both can be overridden per profile in profile.yaml.
+    thinking: adaptive
+    effort: high
     # Compact the friend session once it exceeds this many tokens (shared by
     # all profiles; checked when the 24h idle ping fires). The window is
     # 200000 today and the CLI already autocompacts at ~167000, so 400000
@@ -24,9 +30,15 @@ claude:
     compact_at_tokens: 400000
   teacher:
     allowed_tools: [Read, WebSearch, Skill]
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5-5
     default_language_level: B2
     workdir: german/teacher
+    thinking: adaptive
+    # How hard the teacher thinks before answering (low / medium / high /
+    # xhigh / max). On Sonnet 4.6 the default made corrections take 20-50 s;
+    # on Sonnet 5.5, high takes ~8-11 s (with the markup tool) and catches
+    # more than medium.
+    effort: high
     # Compact the teacher session after a reply once it exceeds this many
     # tokens. Same caveat as the friend limit above.
     compact_at_tokens: 400000
@@ -36,13 +48,19 @@ sessions:
   friend_history_max: 10             # /rewind can go back up to this many turns
 
 proactivity:
-  idle_ping_after_seconds: 86400     # 24h silence before a re-engagement ping
+  # Re-engagement pings while the user is silent: the first after 2 days, the
+  # next 3 days later (day 5), then 10 days later (day 15), then every 10 days.
+  # Each gap counts from the previous ping; the last gap repeats. Any message
+  # from the user starts over at the first gap.
+  idle_ping_schedule_days: [2, 3, 10]
   idle_check_interval_seconds: 3600  # how often the background loop wakes
   idle_prompt: |
-    [SYSTEM] Der Nutzer war 24 Stunden still. Beginne ein neues Gespräch —
-    frag etwas Interessantes oder erzähl einen typisch deutschen Witz.
-    Beziehe dich NICHT darauf, dass er weg war. Schreib einfach, als ob
-    dir gerade etwas eingefallen wäre.
+    [SYSTEM] Der Nutzer hat eine Weile nicht geschrieben. Beginne ein neues
+    Gespräch — frag etwas Interessantes oder erzähl einen typisch deutschen
+    Witz. Beziehe dich NICHT darauf, dass er weg war. Schreib einfach, als ob
+    dir gerade etwas eingefallen wäre. Ist schon eine deiner Nachrichten
+    unbeantwortet geblieben, dann fang ein ganz anderes Thema an, halt es
+    kurz und mach keinen Druck.
 
 teacher:
   ok_marker: "OK"                    # exact string Lehrer outputs when the message is correct

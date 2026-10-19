@@ -3,8 +3,8 @@
 # damit migrierte Sessions weiterhin passen (gleiche Antwort-IDs).
 label: "🇩🇪 Alltags-Freund"
 description: "Lockerer deutscher Kumpel zum Quatschen im Alltag"
-# model / default_language_level werden aus claude.friend in config.yaml geerbt,
-# wenn hier nicht gesetzt.
+# model / default_language_level / thinking / effort werden aus claude.friend
+# in config.yaml geerbt, wenn hier nicht gesetzt.
 
 onboarding:
   - id: name

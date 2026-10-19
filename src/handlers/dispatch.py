@@ -110,16 +110,22 @@ def _queue_friend_turn(app: Application, user_id: int, chat_id: int,
     )
 
 
+def _mark_user_active(user_id: int, chat_id: int) -> None:
+    """A user message restarts the idle-ping schedule (see idle.py)."""
+    user = load_user(user_id)
+    user["chat_id"] = chat_id
+    user["last_message_ts"] = now_iso()
+    user["idle_ping_sent_at"] = None
+    user["idle_pings"] = 0
+    save_user(user_id, user)
+
+
 async def dispatch_user_text(app: Application, user_id: int, chat_id: int,
                               message_id: int, text: str,
                               quoted: str | None = None,
                               images: list[Path] | None = None,
                               media_group_id: str | None = None) -> None:
-    user = load_user(user_id)
-    user["chat_id"] = chat_id
-    user["last_message_ts"] = now_iso()
-    user["idle_ping_sent_at"] = None
-    save_user(user_id, user)
+    _mark_user_active(user_id, chat_id)
 
     # The friend sees a reference to the quoted message; the teacher keeps
     # evaluating the user's plain text against the latest friend reply.
@@ -202,6 +208,7 @@ async def handle_user_text(app: Application, update: Update, text: str,
             # The teacher never sees photos; keep them for the next friend turn.
             for path in images or []:
                 stage(user_id, path)
+            _mark_user_active(user_id, chat_id)
             asyncio.create_task(
                 _run_followup_with_keeper(
                     app, user_id, chat_id, message_id, text,

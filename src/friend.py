@@ -142,7 +142,8 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
 
         # Photos the friend picks land in `outbox` and go out after its text.
         outbox: list[OutPhoto] = []
-        photo_kw = {"images": pending.images}
+        photo_kw = {"images": pending.images,
+                    "thinking": meta.thinking, "effort": meta.effort}
         if PHOTOS_ENABLED:
             server, names = build_photo_server(outbox)
             photo_kw.update(mcp_servers={"fotos": server}, extra_tools=names)
@@ -192,8 +193,6 @@ async def friend_turn(app: Application, user_id: int, chat_id: int) -> None:
                 history = history[-FRIEND_HISTORY_MAX:]
             st["history"] = history
         user["chat_id"] = chat_id
-        user["last_message_ts"] = now_iso()
-        user["idle_ping_sent_at"] = None
         last_text = final or (seg_texts[-1] if seg_texts else "")
         if last_text:
             st["last_reply"] = last_text

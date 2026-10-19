@@ -31,6 +31,7 @@ def _default_user() -> dict:
         "teacher": None,        # ONE teacher session, shared across friend profiles
         "last_message_ts": None,
         "idle_ping_sent_at": None,
+        "idle_pings": 0,        # pings sent since the user's last message
         "chat_id": None,
         "last_teacher_message_id": None,
         "teacher_message_ids": [],  # recent teacher corrections that stay repliable

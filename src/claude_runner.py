@@ -62,6 +62,19 @@ class ClaudeResult:
     context_tokens: Optional[int] = None
 
 
+def _thinking_config(thinking: Any) -> Optional[dict[str, Any]]:
+    """Config value -> SDK thinking config. "adaptive" lets the model decide
+    per turn; an integer is a token budget it thinks with every turn;
+    "disabled" / off turns thinking off; None keeps the CLI default."""
+    if thinking is None:
+        return None
+    if thinking is False or str(thinking).lower() in ("disabled", "off", "none"):
+        return {"type": "disabled"}
+    if thinking is True or str(thinking).lower() == "adaptive":
+        return {"type": "adaptive"}
+    return {"type": "enabled", "budget_tokens": int(thinking)}
+
+
 def _build_options(
     workdir: str,
     allowed_tools: str,
@@ -71,6 +84,8 @@ def _build_options(
     mcp_servers: Optional[dict[str, Any]] = None,
     extra_tools: Optional[list[str]] = None,
     partial: bool = False,
+    thinking: Any = None,
+    effort: Optional[str] = None,
 ) -> ClaudeAgentOptions:
     tools = [t.strip() for t in allowed_tools.split(",") if t.strip()]
     # `Skill` in allowed_tools is deprecated; the skills option is the way in.
@@ -87,6 +102,8 @@ def _build_options(
         betas=_BETAS,
         stderr=stderr.append if stderr is not None else None,
         include_partial_messages=partial,
+        thinking=_thinking_config(thinking),
+        effort=effort,
     )
 
 
@@ -156,16 +173,20 @@ async def run_claude(
     extra_tools: Optional[list[str]] = None,
     on_text: Optional[Callable[[str], None]] = None,
     on_tool: Optional[Callable[[], None]] = None,
+    thinking: Any = None,
+    effort: Optional[str] = None,
 ) -> ClaudeResult:
     """Run one Claude Code turn, resuming `session_id` when given. `images` are
     attached to the message; `mcp_servers`/`extra_tools` add in-process tools.
-    `on_text` gets each text chunk as it streams and `on_tool` fires when a
+    `thinking` (see `_thinking_config`) and `effort` override the CLI's
+    defaults when set. `on_text` gets each text chunk as it streams and `on_tool` fires when a
     tool call starts; both are sync and must not block. Cancel the surrounding
     task to abort the turn."""
     stderr: list[str] = []
     streaming = on_text is not None or on_tool is not None
     options = _build_options(workdir, allowed_tools, model, session_id, stderr,
-                             mcp_servers, extra_tools, partial=streaming)
+                             mcp_servers, extra_tools, partial=streaming,
+                             thinking=thinking, effort=effort)
 
     text_parts: list[str] = []
     prompt = _prompt_with_images(message, images) if images else message

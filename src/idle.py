@@ -10,7 +10,7 @@ from .claude_runner import compact_session, get_context
 from .config import (
     FRIEND_COMPACT_AT,
     IDLE_CHECK_INTERVAL,
-    IDLE_PING_AFTER,
+    IDLE_PING_SCHEDULE,
     IDLE_PROMPT,
     friend_profile,
 )
@@ -56,6 +56,31 @@ async def _compact_idle_friend(user: dict) -> None:
         logger.info("Friend session %s compacted (was %d tokens)", sid, tokens)
 
 
+def _parse_ts(value) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def ping_due(user: dict, now: dt.datetime) -> bool:
+    """Whether the next idle ping is due. The n-th ping since the user's last
+    message waits IDLE_PING_SCHEDULE[n] after the previous ping (the first one
+    after the user's message); past the end, the last gap repeats."""
+    last = _parse_ts(user.get("last_message_ts"))
+    if last is None:
+        return False
+    count = int(user.get("idle_pings") or 0)
+    pinged = _parse_ts(user.get("idle_ping_sent_at"))
+    anchor = pinged if count and pinged and pinged > last else last
+    if anchor is last:
+        count = 0
+    gap = IDLE_PING_SCHEDULE[min(count, len(IDLE_PING_SCHEDULE) - 1)]
+    return (now - anchor).total_seconds() >= gap
+
+
 async def idle_pinger(app: Application) -> None:
     await asyncio.sleep(5)  # let things settle on startup
     while True:
@@ -66,28 +91,16 @@ async def idle_pinger(app: Application) -> None:
             # (no friend persona runs in groups).
             for uid in iter_user_ids():
                 user = load_user(uid)
-                last = user.get("last_message_ts")
                 chat_id = user.get("chat_id")
-                if not last or not chat_id:
+                if not chat_id or not ping_due(user, now):
                     continue
-                try:
-                    last_dt = dt.datetime.fromisoformat(last.replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-                idle_s = (now - last_dt).total_seconds()
-                if idle_s < IDLE_PING_AFTER:
-                    continue
-                pinged = user.get("idle_ping_sent_at")
-                if pinged:
-                    try:
-                        pinged_dt = dt.datetime.fromisoformat(pinged.replace("Z", "+00:00"))
-                        if pinged_dt > last_dt:
-                            continue
-                    except ValueError:
-                        pass
 
-                logger.info("Idle ping for user %s (idle %ss)", uid, int(idle_s))
+                last = _parse_ts(user.get("last_message_ts")) or now
+                count = int(user.get("idle_pings") or 0) + 1
+                logger.info("Idle ping #%d for user %s (silent %.1f days)",
+                            count, uid, (now - last).total_seconds() / 86400)
                 user["idle_ping_sent_at"] = now_iso()
+                user["idle_pings"] = count
                 save_user(uid, user)
 
                 if uid in PENDING_FRIEND:

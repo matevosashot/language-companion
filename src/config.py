@@ -62,6 +62,13 @@ FRIEND_TOOLS = _tools(_FRIEND)
 TEACHER_TOOLS = _tools(_TEACHER)
 FRIEND_DEFAULT_LEVEL = _FRIEND["default_language_level"]
 TEACHER_DEFAULT_LEVEL = _TEACHER["default_language_level"]
+# Thinking: "adaptive" (model decides), an int token budget (thinks every
+# turn), or "disabled"/off. Effort: low/medium/high/xhigh/max — how long the
+# model thinks, i.e. most of the reply latency. Unset = the CLI default.
+FRIEND_THINKING = _FRIEND.get("thinking")
+FRIEND_EFFORT = _FRIEND.get("effort") or None
+TEACHER_THINKING = _TEACHER.get("thinking")
+TEACHER_EFFORT = _TEACHER.get("effort") or None
 # 0 disables compaction for that persona.
 FRIEND_COMPACT_AT = int(_FRIEND.get("compact_at_tokens") or 0)
 TEACHER_COMPACT_AT = int(_TEACHER.get("compact_at_tokens") or 0)
@@ -88,6 +95,8 @@ class FriendProfile:
     model: str | None = None
     level: str = FRIEND_DEFAULT_LEVEL
     tools: str = FRIEND_TOOLS
+    thinking: object = FRIEND_THINKING
+    effort: str | None = FRIEND_EFFORT
     onboarding: list = field(default_factory=list)
 
 
@@ -111,6 +120,8 @@ def _load_friend_profiles() -> dict[str, FriendProfile]:
             model=meta.get("model") or FRIEND_MODEL,
             level=meta.get("default_language_level") or FRIEND_DEFAULT_LEVEL,
             tools=",".join(tools_list) if tools_list else FRIEND_TOOLS,
+            thinking=meta["thinking"] if "thinking" in meta else FRIEND_THINKING,
+            effort=meta.get("effort") or FRIEND_EFFORT,
             onboarding=meta.get("onboarding") or [],
         )
     return profiles
@@ -132,7 +143,13 @@ def friend_profile(pid: str | None) -> FriendProfile:
 SESSIONS_DIR = SCRIPT_DIR / CFG["sessions"]["dir"]
 FRIEND_HISTORY_MAX = int(CFG["sessions"]["friend_history_max"])
 
-IDLE_PING_AFTER = int(CFG["proactivity"]["idle_ping_after_seconds"])
+# Gaps between re-engagement pings, in seconds: the first after the user's
+# last message, each next one after the previous ping; the last gap repeats.
+# A user message starts over at the first gap.
+_PRO = CFG["proactivity"]
+IDLE_PING_SCHEDULE = [
+    int(float(d) * 86400) for d in (_PRO.get("idle_ping_schedule_days") or [])
+] or [int(_PRO["idle_ping_after_seconds"])]
 IDLE_CHECK_INTERVAL = int(CFG["proactivity"]["idle_check_interval_seconds"])
 IDLE_PROMPT = CFG["proactivity"]["idle_prompt"]
 
